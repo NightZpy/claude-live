@@ -853,20 +853,37 @@ function buildSlackMrkdwn(daily, lang) {
     { label: t2.daily_today || 'Hoy', md: lang === 'en' ? (daily.today_md_en || daily.today_md) : daily.today_md },
     { label: t2.daily_blockers || 'Bloqueos', md: lang === 'en' ? (daily.blockers_md_en || daily.blockers_md) : daily.blockers_md },
   ];
-  var parts = ['*Daily · ' + daily.date + '*', ''];
+
+  function fmtSlackDate(dateStr) {
+    var parts = (dateStr || '').split('-');
+    if (parts.length !== 3) return dateStr || '';
+    var month = parseInt(parts[1], 10) - 1;
+    var day = parseInt(parts[2], 10);
+    if (isNaN(month) || isNaN(day) || month < 0 || month > 11) return dateStr || '';
+    var enMonths = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    var esMonths = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
+    var ptMonths = ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
+    if (lang === 'en') return (enMonths[month] || '') + ' ' + day;
+    var mnames = lang === 'pt' ? ptMonths : esMonths;
+    return day + ' ' + (mnames[month] || '');
+  }
+
+  var parts = ['📋 Daily · ' + fmtSlackDate(daily.date), ''];
+  var firstSection = true;
   for (var i = 0; i < sections.length; i++) {
     var sec = sections[i];
-    parts.push('*' + sec.label + '*');
-    var lines = (sec.md || '').split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
-    if (lines.length === 0) {
-      parts.push('• —');
-    } else {
-      for (var j = 0; j < lines.length; j++) {
-        var txt = lines[j].startsWith('- ') ? lines[j].slice(2) : lines[j];
-        parts.push('• ' + txt);
-      }
+    var bullets = (sec.md || '').split('\n')
+      .map(function(l) { return l.trim(); })
+      .filter(function(l) { return l.length > 0; })
+      .map(function(l) { return l.startsWith('- ') ? l.slice(2) : l; })
+      .filter(function(l) { return l.length > 0; });
+    if (bullets.length === 0) continue;
+    if (!firstSection) parts.push('');
+    firstSection = false;
+    parts.push(sec.label);
+    for (var j = 0; j < bullets.length; j++) {
+      parts.push('• ' + bullets[j]);
     }
-    if (i < sections.length - 1) parts.push('');
   }
   return parts.join('\n');
 }
