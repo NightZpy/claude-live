@@ -72,6 +72,9 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
   return Bun.serve({
     hostname: "127.0.0.1",
     port,
+    // /api/daily/regenerate, /api/sessions/:id/summarize, and /api/sessions/:id/resume-prompt
+    // invoke the LLM and can take longer than Bun's 10s default idleTimeout.
+    idleTimeout: 255, // Bun's maximum (seconds)
     async fetch(req) {
       const host = (req.headers.get("host") ?? "").split(":")[0];
       if (host !== "localhost" && host !== "127.0.0.1") return new Response("forbidden", { status: 403 });
