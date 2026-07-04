@@ -38,7 +38,8 @@ export const defaultRunner: SlackRunner = async (
   prompt: string,
   allowedTools: string[]
 ): Promise<string> => {
-  const bin = loadConfig().claudeBin ?? "claude";
+  const cfg = loadConfig();
+  const bin = cfg.claudeBin ?? "claude";
   const proc = Bun.spawn(
     [
       bin, "-p",
@@ -52,7 +53,8 @@ export const defaultRunner: SlackRunner = async (
       env: {
         ...process.env,
         CLAUDE_LIVE_IGNORE: "1",
-        // CLAUDE_CONFIG_DIR not set — inherits from caller's environment
+        ...(cfg.claudeConfigDir ? { CLAUDE_CONFIG_DIR: cfg.claudeConfigDir } : {}),
+        ...(cfg.claudePath ? { PATH: cfg.claudePath } : {}),
       },
     }
   );

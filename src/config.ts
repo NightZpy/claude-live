@@ -14,6 +14,8 @@ export type Config = {
   slackToken?: string;
   linearToken?: string;
   claudeBin?: string;
+  claudeConfigDir?: string;
+  claudePath?: string;
 };
 
 export const DEFAULT_CONFIG: Config = {

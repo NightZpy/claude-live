@@ -2,7 +2,8 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectInstances, installHooks, uninstallHooks, hookCommand, isOurs, deployApp, resolveClaudeBin } from "../src/setup";
+import { detectInstances, installHooks, uninstallHooks, hookCommand, isOurs, deployApp, resolveClaudeBin, buildAugmentedPath, resolveClaudeConfigDir } from "../src/setup";
+import type { SpawnRunner } from "../src/setup";
 
 function fakeHome() {
   const home = mkdtempSync(join(tmpdir(), "cl-setup-"));
@@ -201,6 +202,115 @@ test("resolveClaudeBin falls back to known path when which fails", () => {
     "/usr/local/bin/claude",
   ];
   expect(validResults).toContain(result);
+});
+
+test("resolveClaudeConfigDir returns first candidate whose output lacks not-logged-in markers", () => {
+  const origCfgDir = process.env.CLAUDE_CONFIG_DIR;
+  delete process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const fakeRunner: SpawnRunner = (_cmd, _env) => ({ stdout: "ok", stderr: "" });
+    const result = resolveClaudeConfigDir(
+      "/usr/local/bin/claude",
+      [{ dir: "/d1", name: "work" }],
+      "/usr/local/bin:/opt/homebrew/bin",
+      fakeRunner
+    );
+    expect(result).toBe("/d1");
+  } finally {
+    if (origCfgDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = origCfgDir;
+  }
+});
+
+test("resolveClaudeConfigDir skips candidate whose output contains 'Please run /login'", () => {
+  const origCfgDir = process.env.CLAUDE_CONFIG_DIR;
+  delete process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const fakeRunner: SpawnRunner = (_cmd, env) => {
+      if (env.CLAUDE_CONFIG_DIR === "/d1") return { stdout: "Please run /login", stderr: "" };
+      if (env.CLAUDE_CONFIG_DIR === "/d2") return { stdout: "ok", stderr: "" };
+      return { stdout: "Not logged in", stderr: "" };
+    };
+    const result = resolveClaudeConfigDir(
+      "/usr/local/bin/claude",
+      [{ dir: "/d1", name: "work" }, { dir: "/d2", name: "personal" }],
+      "/usr/local/bin:/opt/homebrew/bin",
+      fakeRunner
+    );
+    expect(result).toBe("/d2");
+  } finally {
+    if (origCfgDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = origCfgDir;
+  }
+});
+
+test("resolveClaudeConfigDir falls back when all candidates fail", () => {
+  const origCfgDir = process.env.CLAUDE_CONFIG_DIR;
+  delete process.env.CLAUDE_CONFIG_DIR;
+  try {
+    const fakeRunner: SpawnRunner = (_cmd, _env) => ({
+      stdout: "Not logged in · Please run /login",
+      stderr: "",
+    });
+    const result = resolveClaudeConfigDir(
+      "/usr/local/bin/claude",
+      [],
+      "/usr/local/bin",
+      fakeRunner
+    );
+    expect(result.endsWith("/.claude")).toBe(true);
+  } finally {
+    if (origCfgDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = origCfgDir;
+  }
+});
+
+test("buildAugmentedPath includes expected dirs", () => {
+  const result = buildAugmentedPath("/some/bin/claude");
+  const parts = result.split(":");
+  expect(result).toContain("/some/bin");
+  expect(result).toContain("/opt/homebrew/bin");
+  expect(result).toContain("/usr/local/bin");
+  expect(result).toContain((process.env.HOME ?? "") + "/.local/bin");
+  expect(result).toContain((process.env.HOME ?? "") + "/.bun/bin");
+  expect(parts.every(s => s.length > 0)).toBe(true);
+});
+
+test("plistContent includes EnvironmentVariables when claudePath and claudeConfigDir set", async () => {
+  const tmpHome = mkdtempSync(join(tmpdir(), "cl-plist-env-"));
+  const origHome = process.env.CLAUDE_LIVE_HOME;
+  process.env.CLAUDE_LIVE_HOME = tmpHome;
+  try {
+    writeFileSync(
+      join(tmpHome, "config.json"),
+      JSON.stringify({ claudePath: "/test/aug/path", claudeConfigDir: "/test/.claude-work" }) + "\n"
+    );
+    const { plistContent } = await import("../src/setup");
+    const p = plistContent("/repo/whatever");
+    expect(p).toContain("<key>EnvironmentVariables</key>");
+    expect(p).toContain("<key>PATH</key>");
+    expect(p).toContain("/test/aug/path");
+    expect(p).toContain("<key>CLAUDE_CONFIG_DIR</key>");
+    expect(p).toContain("/test/.claude-work");
+  } finally {
+    if (origHome === undefined) delete process.env.CLAUDE_LIVE_HOME;
+    else process.env.CLAUDE_LIVE_HOME = origHome;
+  }
+});
+
+test("plistContent omits EnvironmentVariables when neither claudePath nor claudeConfigDir set", async () => {
+  const tmpHome = mkdtempSync(join(tmpdir(), "cl-plist-noenv-"));
+  const origHome = process.env.CLAUDE_LIVE_HOME;
+  process.env.CLAUDE_LIVE_HOME = tmpHome;
+  try {
+    // No config.json written — loadConfig returns DEFAULT_CONFIG
+    const { plistContent } = await import("../src/setup");
+    const p = plistContent("/repo/whatever");
+    expect(p).not.toContain("<key>EnvironmentVariables</key>");
+  } finally {
+    if (origHome === undefined) delete process.env.CLAUDE_LIVE_HOME;
+    else process.env.CLAUDE_LIVE_HOME = origHome;
+  }
 });
 
 test("deployApp copies src, ui, package.json into homeDir/app and returns appDir", () => {
