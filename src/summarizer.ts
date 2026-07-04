@@ -24,14 +24,20 @@ export function buildRunnerArgs(bin: string = "claude"): string[] {
 }
 
 export const defaultRunner: LlmRunner = async (prompt: string): Promise<string> => {
-  const bin = loadConfig().claudeBin ?? "claude";
+  const cfg = loadConfig();
+  const bin = cfg.claudeBin ?? "claude";
   const proc = Bun.spawn(
     buildRunnerArgs(bin),
     {
       stdin: Buffer.from(prompt),
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, CLAUDE_LIVE_IGNORE: "1" },
+      env: {
+        ...process.env,
+        CLAUDE_LIVE_IGNORE: "1",
+        ...(cfg.claudeConfigDir ? { CLAUDE_CONFIG_DIR: cfg.claudeConfigDir } : {}),
+        ...(cfg.claudePath ? { PATH: cfg.claudePath } : {}),
+      },
     }
   );
 

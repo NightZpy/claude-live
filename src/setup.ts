@@ -1,5 +1,5 @@
 import { readdirSync, existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import type { Instance } from "./config";
@@ -158,9 +158,21 @@ export function deployApp(repoRoot: string): string {
 }
 
 export function plistContent(_repoRoot: string): string {
+  const config = loadConfig();
   const appDir = join(homeDir(), "app");
   const serverPath = join(appDir, "src", "server.ts");
   const logPath = join(homeDir(), "server.log");
+
+  const hasPath = !!config.claudePath;
+  const hasConfigDir = !!config.claudeConfigDir;
+  const envBlock = (hasPath || hasConfigDir)
+    ? `\n  <key>EnvironmentVariables</key>\n  <dict>${
+        hasPath ? `\n    <key>PATH</key>\n    <string>${xmlEscape(config.claudePath!)}</string>` : ""
+      }${
+        hasConfigDir ? `\n    <key>CLAUDE_CONFIG_DIR</key>\n    <string>${xmlEscape(config.claudeConfigDir!)}</string>` : ""
+      }\n  </dict>`
+    : "";
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -179,7 +191,7 @@ export function plistContent(_repoRoot: string): string {
   <key>StandardOutPath</key>
   <string>${xmlEscape(logPath)}</string>
   <key>StandardErrorPath</key>
-  <string>${xmlEscape(logPath)}</string>
+  <string>${xmlEscape(logPath)}</string>${envBlock}
 </dict>
 </plist>`;
 }
@@ -287,6 +299,100 @@ export function resolveClaudeBin(
   return "claude";
 }
 
+export function buildAugmentedPath(claudeBin: string): string {
+  const HOME = process.env.HOME ?? "";
+  const segments: string[] = [
+    dirname(claudeBin),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    `${HOME}/.local/bin`,
+    `${HOME}/.bun/bin`,
+  ];
+
+  try {
+    const result = Bun.spawnSync(["which", "node"], { stdout: "pipe" });
+    if (result.exitCode === 0) {
+      const nodeDir = dirname(new TextDecoder().decode(result.stdout).trim());
+      if (nodeDir) segments.push(nodeDir);
+    }
+  } catch {
+    // silently skip
+  }
+
+  if (process.env.PATH) segments.push(process.env.PATH);
+
+  // Dedupe: first occurrence wins
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const seg of segments) {
+    // split on : in case PATH itself contains multiple entries
+    for (const part of seg.split(":")) {
+      if (part && !seen.has(part)) {
+        seen.add(part);
+        deduped.push(part);
+      }
+    }
+  }
+  return deduped.join(":");
+}
+
+export type SpawnRunner = (
+  cmd: string[],
+  env: Record<string, string>
+) => { stdout: string; stderr: string };
+
+export function resolveClaudeConfigDir(
+  claudeBin: string,
+  instances: Instance[],
+  augmentedPath: string,
+  runner?: SpawnRunner
+): string {
+  // Build candidates list (deduped, first occurrence wins)
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  const tryAdd = (dir: string) => {
+    if (dir && !seen.has(dir)) { seen.add(dir); candidates.push(dir); }
+  };
+
+  if (process.env.CLAUDE_CONFIG_DIR) tryAdd(process.env.CLAUDE_CONFIG_DIR);
+  for (const inst of instances) tryAdd(inst.dir);
+  tryAdd(`${process.env.HOME ?? ""}/.claude`);
+
+  const defaultRun: SpawnRunner = (cmd, envVars) => {
+    const result = Bun.spawnSync(cmd, {
+      env: envVars,
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 60000,
+    });
+    return {
+      stdout: new TextDecoder().decode(result.stdout),
+      stderr: new TextDecoder().decode(result.stderr),
+    };
+  };
+
+  const run = runner ?? defaultRun;
+
+  for (const candidate of candidates) {
+    const result = run(
+      [claudeBin, "-p", "--model", "claude-haiku-4-5-20251001", "--max-turns", "1", "ok"],
+      {
+        ...(process.env as Record<string, string>),
+        CLAUDE_CONFIG_DIR: candidate,
+        CLAUDE_LIVE_IGNORE: "1",
+        PATH: augmentedPath,
+      }
+    );
+    const combined = result.stdout + result.stderr;
+    const lower = combined.toLowerCase();
+    if (!lower.includes("not logged in") && !combined.includes("Please run /login")) {
+      return candidate;
+    }
+  }
+
+  return process.env.CLAUDE_CONFIG_DIR ?? `${process.env.HOME ?? ""}/.claude`;
+}
+
 // CLI wizard — only runs when executed directly
 if (import.meta.main) {
   const args = process.argv.slice(2);
@@ -358,6 +464,9 @@ if (import.meta.main) {
   cfg.language = lang;
   cfg.instances = confirmed;
   cfg.claudeBin = resolveClaudeBin();
+  const augPath = buildAugmentedPath(cfg.claudeBin);
+  cfg.claudePath = augPath;
+  cfg.claudeConfigDir = resolveClaudeConfigDir(cfg.claudeBin, cfg.instances, augPath);
   saveConfig(cfg);
 
   if (launchd) {
