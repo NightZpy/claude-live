@@ -13,6 +13,7 @@ export type Config = {
   dailyAuto?: boolean;
   slackToken?: string;
   linearToken?: string;
+  claudeBin?: string;
 };
 
 export const DEFAULT_CONFIG: Config = {
