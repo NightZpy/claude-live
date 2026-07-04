@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>claude-live</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="wrap">
+    <div class="topbar">
+      <div class="topbar-row">
+        <input id="search" type="search" autocomplete="off">
+        <button id="settings-btn" title="Configuración">⚙</button>
+      </div>
+      <div id="filters"></div>
+    </div>
+    <div class="cols">
+      <div class="ledger">
+        <div id="daily-card" hidden></div>
+        <div id="slack-card" hidden></div>
+        <div id="signals-card" hidden></div>
+        <div class="seclbl" id="lbl-active"></div>
+        <div id="sessions"></div>
+        <div class="seclbl" id="lbl-archived"></div>
+        <div id="archived"></div>
+      </div>
+      <aside id="detail" hidden>
+        <div class="d-head">
+          <span class="d-title"></span>
+          <button id="d-resume-copy"></button><button id="d-copy-id"></button>
+          <button class="d-close" id="d-close">✕ esc</button>
+        </div>
+        <div id="d-body"></div>
+      </aside>
+    </div>
+    <div id="settings-panel" hidden>
+      <div id="settings-overlay"></div>
+      <div id="settings-drawer">
+        <div id="settings-head">
+          <span id="settings-title"></span>
+          <button id="settings-close">✕</button>
+        </div>
+        <div id="settings-body"></div>
+      </div>
+    </div>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

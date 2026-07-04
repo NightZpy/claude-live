@@ -1,0 +1,429 @@
+import type { Database } from "bun:sqlite";
+import { join } from "node:path";
+import { watch } from "node:fs";
+import { openDb } from "./db";
+import { sweep } from "./sweeper";
+import { loadConfig, saveConfig } from "./config";
+import { detectInstances } from "./setup";
+import { homedir } from "node:os";
+import { runSummarizer, summarizeOne, defaultRunner, type LlmRunner } from "./summarizer";
+import { search } from "./search";
+import { generateDaily, dateKey } from "./daily";
+import { runSlack, defaultRunner as slackDefaultRunner } from "./slack";
+import { buildResumePrompt, buildResumePromptRich } from "./resume";
+import { notify, checkNotifications } from "./notify";
+import { runLinks, enrichPRs, defaultGhRunner } from "./links";
+import { enrichLinear } from "./linear";
+import { syncDeadlines } from "./deadlines";
+
+const UI_DIR = join(import.meta.dir, "../ui");
+const STATIC = new Set(["index.html", "app.js", "style.css"]);
+
+const _sseControllers = new Set<ReadableStreamDefaultController<string>>();
+let _watcherStarted = false;
+
+function _ensureWatcher() {
+  if (_watcherStarted) return;
+  _watcherStarted = true;
+  let debounce: ReturnType<typeof setTimeout> | null = null;
+  try {
+    watch(UI_DIR, { recursive: true }, () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        debounce = null;
+        const msg = "event: reload\ndata: {}\n\n";
+        _sseControllers.forEach(ctrl => { try { ctrl.enqueue(msg); } catch {} });
+      }, 300);
+    });
+  } catch {
+    // fs.watch not available — hot reload disabled
+  }
+}
+
+const ACTIVE_SQL = `
+  SELECT s.*,
+    (SELECT COUNT(*) FROM session_files f WHERE f.session_id = s.id) AS file_count,
+    (SELECT COUNT(*) FROM mentions m WHERE m.session_id = s.id AND m.resolved = 0 AND (m.resolved_manual IS NULL OR m.resolved_manual = 0)) AS mentions_open
+  FROM sessions s WHERE s.status != 'archived'
+  ORDER BY CASE s.status WHEN 'waiting_input' THEN 0 WHEN 'running' THEN 1 ELSE 2 END, s.last_activity DESC`;
+const ARCHIVED_SQL = `
+  SELECT s.*,
+    (SELECT COUNT(*) FROM session_files f WHERE f.session_id = s.id) AS file_count,
+    (SELECT COUNT(*) FROM mentions m WHERE m.session_id = s.id AND m.resolved = 0 AND (m.resolved_manual IS NULL OR m.resolved_manual = 0)) AS mentions_open
+  FROM sessions s WHERE s.status = 'archived' ORDER BY s.ended_at DESC LIMIT 50`;
+const INBOX_MENTIONS_SQL = `
+  SELECT m.*, s.name AS session_name
+  FROM mentions m LEFT JOIN sessions s ON s.id = m.session_id
+  WHERE m.resolved = 0 AND (m.resolved_manual IS NULL OR m.resolved_manual = 0)
+  ORDER BY m.last_at DESC LIMIT 50`;
+const INBOX_SIGNALS_SQL = `
+  SELECT sg.*, s.name AS session_name
+  FROM signals sg LEFT JOIN sessions s ON s.id = sg.session_id
+  ORDER BY sg.created_at DESC LIMIT 50`;
+
+const DEBOUNCE_MS = 60 * 60 * 1000;
+
+export function createServer(db: Database, opts: { port?: number; dailyRunner?: LlmRunner } = {}) {
+  const cfg = loadConfig();
+  const port = opts.port ?? Number(process.env.PORT ?? cfg.port);
+
+  _ensureWatcher();
+
+  return Bun.serve({
+    hostname: "127.0.0.1",
+    port,
+    async fetch(req) {
+      const host = (req.headers.get("host") ?? "").split(":")[0];
+      if (host !== "localhost" && host !== "127.0.0.1") return new Response("forbidden", { status: 403 });
+      const url = new URL(req.url);
+      if (url.pathname === "/api/sessions") {
+        return Response.json({
+          language: cfg.language,
+          active: db.query(ACTIVE_SQL).all(),
+          archived: db.query(ARCHIVED_SQL).all(),
+        });
+      }
+      if (url.pathname === "/api/inbox") {
+        return Response.json({
+          mentions: db.query(INBOX_MENTIONS_SQL).all(),
+          signals: db.query(INBOX_SIGNALS_SQL).all(),
+        });
+      }
+      const resolveM = url.pathname.match(/^\/api\/mentions\/(\d+)\/resolve$/);
+      if (resolveM && req.method === "POST") {
+        const id = Number(resolveM[1]);
+        db.run(
+          "UPDATE mentions SET resolved_manual = CASE WHEN resolved_manual = 1 THEN NULL ELSE 1 END WHERE id = ?",
+          [id]
+        );
+        const updated = db.query("SELECT resolved_manual FROM mentions WHERE id = ?").get(id) as any;
+        return Response.json({ id, resolved_manual: updated?.resolved_manual ?? null });
+      }
+      const m = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)$/);
+      if (m) {
+        const session = db.query("SELECT * FROM sessions WHERE id = ?").get(m[1]);
+        if (!session) return new Response("not found", { status: 404 });
+        return Response.json({
+          session,
+          files: db.query("SELECT * FROM session_files WHERE session_id = ? ORDER BY ts DESC").all(m[1]),
+          events: db.query("SELECT * FROM events WHERE session_id = ? ORDER BY ts DESC LIMIT 100").all(m[1]),
+          tasks: db.query("SELECT * FROM tasks WHERE session_id = ? ORDER BY opened_at DESC").all(m[1]),
+          mentions: db.query(
+            "SELECT * FROM mentions WHERE session_id = ? AND resolved = 0 AND (resolved_manual IS NULL OR resolved_manual = 0) ORDER BY last_at DESC"
+          ).all(m[1]),
+          links: db.query("SELECT * FROM links WHERE session_id = ? ORDER BY kind, ref").all(m[1]),
+        });
+      }
+      if (url.pathname === "/api/search") {
+        const q = url.searchParams.get("q") ?? "";
+        if (q.length < 2) return Response.json({ results: [] });
+        return Response.json({ results: search(db, q) });
+      }
+      if (url.pathname === "/api/daily" && req.method === "GET") {
+        const row = db.query("SELECT * FROM daily ORDER BY date DESC LIMIT 1").get();
+        if (!row) return Response.json({ date: null });
+        return Response.json(row);
+      }
+      if (url.pathname === "/api/daily/regenerate" && req.method === "POST") {
+        const force = url.searchParams.get("force") === "1";
+        const today = dateKey(Date.now());
+        if (!force) {
+          const existing = db.query("SELECT * FROM daily WHERE date = ?").get(today) as any;
+          if (existing && typeof existing.generated_at === "number" && Date.now() - existing.generated_at < DEBOUNCE_MS) {
+            return Response.json(existing);
+          }
+        }
+        const runner = opts.dailyRunner ?? defaultRunner;
+        const result = await generateDaily(db, runner, cfg.language, Date.now());
+        if (!result) return new Response("generation failed", { status: 500 });
+        return Response.json(result);
+      }
+      const fm = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)\/file$/);
+      if (fm && req.method === "GET") {
+        const sessionId = fm[1];
+        const rawPath = url.searchParams.get("path");
+        if (!rawPath) return new Response("bad request", { status: 400 });
+        const absPath = rawPath;
+
+        // 1. allowlist check — must happen before filesystem access
+        const allowed = db.query("SELECT 1 FROM session_files WHERE session_id=? AND path=?").get(sessionId, absPath);
+        if (!allowed) return new Response("not found", { status: 404, headers: { "X-Content-Type-Options": "nosniff" } });
+
+        // 2. stat (existence + size)
+        let stat: { size: number };
+        try {
+          stat = await Bun.file(absPath).stat();
+        } catch {
+          return Response.json({ error: "missing" }, { status: 410, headers: { "X-Content-Type-Options": "nosniff" } });
+        }
+        if (stat.size > 262144) return Response.json({ error: "too_large" }, { status: 413, headers: { "X-Content-Type-Options": "nosniff" } });
+
+        // 3. image fast path
+        // svg intentionally excluded — serving svg as image/svg+xml allows script execution
+        const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp"]);
+        const ext = absPath.split(".").pop()?.toLowerCase() ?? "";
+        if (IMAGE_EXTS.has(ext)) {
+          const ct = "image/" + (ext === "jpg" ? "jpeg" : ext);
+          return new Response(Bun.file(absPath), { headers: { "Content-Type": ct, "X-Content-Type-Options": "nosniff" } });
+        }
+
+        // 4. binary detection
+        const chunkSize = Math.min(stat.size, 8192);
+        const chunk = await Bun.file(absPath).slice(0, chunkSize).arrayBuffer();
+        const bytes = new Uint8Array(chunk);
+        for (let i = 0; i < bytes.length; i++) {
+          if (bytes[i] === 0) return Response.json({ error: "binary" }, { status: 200, headers: { "X-Content-Type-Options": "nosniff" } });
+        }
+
+        // 5. serve as text
+        const text = await Bun.file(absPath).text();
+        return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8", "X-Content-Type-Options": "nosniff" } });
+      }
+      if (url.pathname === "/api/dev-events") {
+        let ctrl!: ReadableStreamDefaultController<string>;
+        const stream = new ReadableStream<string>({
+          start(controller) {
+            ctrl = controller;
+            _sseControllers.add(ctrl);
+            controller.enqueue(": connected\n\n");
+          },
+          cancel() {
+            _sseControllers.delete(ctrl);
+          },
+        });
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/event-stream; charset=utf-8",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+          },
+        });
+      }
+      const rm = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)\/resume-prompt$/);
+      if (rm) {
+        const prompt = await buildResumePromptRich(db, rm[1], defaultRunner);
+        if (!prompt) return new Response("not found", { status: 404 });
+        return new Response(prompt, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+      }
+      const sm = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)\/summarize$/);
+      if (sm && req.method === "POST") {
+        const session = db.query("SELECT * FROM sessions WHERE id = ?").get(sm[1]) as any;
+        if (!session) return new Response("not found", { status: 404 });
+        try {
+          await summarizeOne(db, session, defaultRunner, loadConfig().language);
+        } catch {
+          return Response.json({ error: "summarize_failed" }, { status: 502 });
+        }
+        return Response.json(db.query("SELECT * FROM sessions WHERE id = ?").get(sm[1]));
+      }
+      if (url.pathname === "/api/config" && req.method === "GET") {
+        const c = loadConfig();
+        const tokenSet = typeof c.slackToken === "string" && c.slackToken.length > 0;
+        const tokenLast4 = tokenSet ? c.slackToken!.slice(-4) : "";
+        const linTokenSet = typeof c.linearToken === "string" && c.linearToken.length > 0;
+        const linTokenLast4 = linTokenSet ? c.linearToken!.slice(-4) : "";
+        return Response.json({
+          language: c.language,
+          port: c.port,
+          notifyWaiting: c.notifyWaiting ?? true,
+          summariesAuto: c.summariesAuto ?? true,
+          dailyAuto: c.dailyAuto ?? true,
+          slackChannelsAlerts: c.slackChannelsAlerts ?? [],
+          slackChannelsDeploys: c.slackChannelsDeploys ?? [],
+          slackTokenSet: tokenSet,
+          slackTokenLast4: tokenLast4,
+          linearTokenSet: linTokenSet,
+          linearTokenLast4: linTokenLast4,
+          instances: c.instances,
+          detectedInstances: detectInstances(homedir()),
+        });
+      }
+      if (url.pathname === "/api/config" && req.method === "POST") {
+        let body: unknown;
+        try {
+          body = await req.json();
+        } catch {
+          return new Response("bad request", { status: 400 });
+        }
+        if (typeof body !== "object" || body === null || Array.isArray(body)) {
+          return new Response("bad request", { status: 400 });
+        }
+        const patch = body as Record<string, unknown>;
+        const current = loadConfig();
+
+        if ("language" in patch) {
+          const lang = patch.language;
+          if (lang !== "es" && lang !== "en" && lang !== "pt") {
+            return new Response("invalid language", { status: 400 });
+          }
+          current.language = lang;
+        }
+        if ("notifyWaiting" in patch && typeof patch.notifyWaiting === "boolean") {
+          current.notifyWaiting = patch.notifyWaiting;
+        }
+        if ("summariesAuto" in patch && typeof patch.summariesAuto === "boolean") {
+          current.summariesAuto = patch.summariesAuto;
+        }
+        if ("dailyAuto" in patch && typeof patch.dailyAuto === "boolean") {
+          current.dailyAuto = patch.dailyAuto;
+        }
+        if ("slackChannelsAlerts" in patch && Array.isArray(patch.slackChannelsAlerts) &&
+            (patch.slackChannelsAlerts as unknown[]).every(x => typeof x === "string")) {
+          current.slackChannelsAlerts = patch.slackChannelsAlerts as string[];
+        }
+        if ("slackChannelsDeploys" in patch && Array.isArray(patch.slackChannelsDeploys) &&
+            (patch.slackChannelsDeploys as unknown[]).every(x => typeof x === "string")) {
+          current.slackChannelsDeploys = patch.slackChannelsDeploys as string[];
+        }
+        if ("instances" in patch && Array.isArray(patch.instances)) {
+          const detected = detectInstances(homedir());
+          const detectedDirs = new Set(detected.map(d => d.dir));
+          const valid = (patch.instances as unknown[]).filter(
+            (inst): inst is { dir: string; name: string } =>
+              typeof inst === "object" && inst !== null &&
+              typeof (inst as any).dir === "string" &&
+              typeof (inst as any).name === "string" &&
+              detectedDirs.has((inst as any).dir)
+          );
+          current.instances = valid;
+        }
+        if ("slackToken" in patch && typeof patch.slackToken === "string") {
+          const tok = patch.slackToken;
+          if (tok === "") {
+            current.slackToken = "";
+          } else if (!tok.startsWith("\u{2022}\u{2022}\u{2022}\u{2022}")) {
+            current.slackToken = tok;
+          }
+          // masked placeholder (starts with "••••") → do not overwrite
+        }
+        if ("linearToken" in patch && typeof patch.linearToken === "string") {
+          const tok = patch.linearToken;
+          if (tok === "") {
+            current.linearToken = "";
+          } else if (!tok.startsWith("\u{2022}\u{2022}\u{2022}\u{2022}")) {
+            current.linearToken = tok;
+          }
+          // masked placeholder → do not overwrite
+        }
+
+        saveConfig(current);
+
+        const c = current;
+        const tokenSet = typeof c.slackToken === "string" && c.slackToken.length > 0;
+        const tokenLast4 = tokenSet ? c.slackToken!.slice(-4) : "";
+        const linTokenSet = typeof c.linearToken === "string" && c.linearToken.length > 0;
+        const linTokenLast4 = linTokenSet ? c.linearToken!.slice(-4) : "";
+        return Response.json({
+          language: c.language,
+          port: c.port,
+          notifyWaiting: c.notifyWaiting ?? true,
+          summariesAuto: c.summariesAuto ?? true,
+          dailyAuto: c.dailyAuto ?? true,
+          slackChannelsAlerts: c.slackChannelsAlerts ?? [],
+          slackChannelsDeploys: c.slackChannelsDeploys ?? [],
+          slackTokenSet: tokenSet,
+          slackTokenLast4: tokenLast4,
+          linearTokenSet: linTokenSet,
+          linearTokenLast4: linTokenLast4,
+          instances: c.instances,
+          detectedInstances: detectInstances(homedir()),
+        });
+      }
+      if (url.pathname === "/api/deadlines" && req.method === "GET") {
+        const rows = db.query(
+          "SELECT * FROM deadlines WHERE status != 'dismissed' ORDER BY due_at ASC NULLS LAST, confidence DESC"
+        ).all();
+        return Response.json({ deadlines: rows });
+      }
+      if (url.pathname === "/api/deadlines" && req.method === "POST") {
+        let body: unknown;
+        try { body = await req.json(); } catch { return new Response("bad request", { status: 400 }); }
+        if (typeof body !== "object" || body === null) return new Response("bad request", { status: 400 });
+        const b = body as Record<string, unknown>;
+        const now = Date.now();
+        const placeholder = "manual:pending:" + now + ":" + Math.random().toString(36).slice(2, 10);
+        db.run(
+          `INSERT INTO deadlines (source, ref, title, due_at, estimate_hours, session_id, instance, status, confidence, manual_override, created_at, updated_at)
+           VALUES ('manual', ?, ?, ?, ?, ?, ?, 'open', 1.0, 1, ?, ?)`,
+          [placeholder,
+           typeof b.title === "string" ? b.title : null,
+           typeof b.due_at === "number" ? b.due_at : null,
+           typeof b.estimate_hours === "number" ? b.estimate_hours : null,
+           typeof b.session_id === "string" ? b.session_id : null,
+           typeof b.instance === "string" ? b.instance : null,
+           now, now]
+        );
+        const rowid = (db.query("SELECT last_insert_rowid() AS id").get() as any).id;
+        db.run("UPDATE deadlines SET ref = 'manual:' || id WHERE id = ?", [rowid]);
+        const row = db.query("SELECT * FROM deadlines WHERE id = ?").get(rowid);
+        return Response.json(row);
+      }
+      const dlIdM = url.pathname.match(/^\/api\/deadlines\/(\d+)$/);
+      if (dlIdM && req.method === "PATCH") {
+        const id = Number(dlIdM[1]);
+        let body: unknown;
+        try { body = await req.json(); } catch { return new Response("bad request", { status: 400 }); }
+        if (typeof body !== "object" || body === null) return new Response("bad request", { status: 400 });
+        const b = body as Record<string, unknown>;
+        const existing = db.query("SELECT * FROM deadlines WHERE id = ?").get(id) as any;
+        if (!existing) return Response.json({ error: "not found" }, { status: 404 });
+        const fields: string[] = ["manual_override = 1", "updated_at = ?"];
+        const vals: unknown[] = [Date.now()];
+        if ("title" in b && typeof b.title === "string") { fields.push("title = ?"); vals.push(b.title); }
+        if ("due_at" in b && (typeof b.due_at === "number" || b.due_at === null)) { fields.push("due_at = ?"); vals.push(b.due_at); }
+        if ("estimate_hours" in b && (typeof b.estimate_hours === "number" || b.estimate_hours === null)) { fields.push("estimate_hours = ?"); vals.push(b.estimate_hours); }
+        if ("status" in b && (b.status === "open" || b.status === "done" || b.status === "dismissed")) { fields.push("status = ?"); vals.push(b.status); }
+        vals.push(id);
+        try {
+          db.run(`UPDATE deadlines SET ${fields.join(", ")} WHERE id = ?`, vals);
+        } catch {
+          return new Response("bad request", { status: 400 });
+        }
+        return Response.json(db.query("SELECT * FROM deadlines WHERE id = ?").get(id));
+      }
+      if (dlIdM && req.method === "DELETE") {
+        const id = Number(dlIdM[1]);
+        db.run("UPDATE deadlines SET status = 'dismissed', updated_at = ? WHERE id = ?", [Date.now(), id]);
+        return Response.json({ ok: true });
+      }
+      const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
+      if (STATIC.has(name)) return new Response(Bun.file(join(UI_DIR, name)));
+      return new Response("not found", { status: 404 });
+    },
+  });
+}
+
+if (import.meta.main) {
+  const db = openDb();
+  const cfg = loadConfig();
+  sweep(db);
+  setInterval(() => {
+    sweep(db);
+    const liveCfg = loadConfig();
+    checkNotifications(db, liveCfg.notifyWaiting !== false ? notify : () => {});
+  }, 60_000);
+  if (cfg.summariesAuto !== false) runSummarizer(db, defaultRunner, cfg.language).catch(() => {});
+  runLinks(db);
+  enrichPRs(db, defaultGhRunner).catch(() => {});
+  enrichLinear(db, cfg.linearToken).catch(() => {});
+  syncDeadlines(db, { llmRunner: defaultRunner, linearToken: cfg.linearToken }).catch(() => {});
+  setInterval(() => {
+    const liveCfg = loadConfig();
+    if (liveCfg.summariesAuto !== false) runSummarizer(db, defaultRunner, liveCfg.language).catch(() => {});
+    try { runLinks(db); } catch {}
+    enrichPRs(db, defaultGhRunner).catch(() => {});
+    enrichLinear(db, liveCfg.linearToken).catch(() => {});
+    syncDeadlines(db, { llmRunner: defaultRunner, linearToken: liveCfg.linearToken }).catch(() => {});
+  }, 300_000);
+  setInterval(() => {
+    const liveCfg = loadConfig();
+    if (liveCfg.dailyAuto !== false) generateDaily(db, defaultRunner, liveCfg.language, Date.now()).catch(() => {});
+  }, 3_600_000);
+  runSlack(db, slackDefaultRunner, defaultRunner, cfg, Date.now()).catch(() => {});
+  setInterval(
+    () => runSlack(db, slackDefaultRunner, defaultRunner, cfg, Date.now()).catch(() => {}),
+    900_000
+  );
+  const srv = createServer(db);
+  console.log(`claude-live on http://localhost:${srv.port}`);
+}

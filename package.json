@@ -1,0 +1,11 @@
+{
+  "name": "claude-live",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "bun src/setup.ts",
+    "serve": "bun src/server.ts",
+    "test": "bun test"
+  }
+}
