@@ -176,6 +176,7 @@ export function openDb(path: string = dbPath()): Database {
     ["sessions", "git_repo TEXT"],
     ["sessions", "git_branch TEXT"],
     ["tasks", "blocked_on TEXT"],
+    ["tasks", "context TEXT"],
     ["daily", "yesterday_md_en TEXT"],
     ["daily", "today_md_en TEXT"],
     ["daily", "blockers_md_en TEXT"],
