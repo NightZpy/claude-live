@@ -5,6 +5,7 @@ import {
   extractPRs,
   extractLinear,
   extractArtifacts,
+  extractArtifactUrls,
   extractSlackThreads,
   syncLinks,
   enrichPRs,
@@ -124,6 +125,35 @@ test("extractArtifacts: matches .html files", () => {
 
 test("extractArtifacts: returns empty for non-matching files", () => {
   expect(extractArtifacts(["/src/foo.ts", "/src/bar.go"])).toHaveLength(0);
+});
+
+// ── extractArtifactUrls ─────────────────────────────────────────────────────
+
+test("extractArtifactUrls: finds claude.ai artifact URL in tool_use input", () => {
+  const toolUses = [
+    { name: "Artifact", input: { url: "https://claude.ai/artifacts/abc123" } },
+  ];
+  const result = extractArtifactUrls(toolUses, "");
+  expect(result).toHaveLength(1);
+  expect(result[0].url).toBe("https://claude.ai/artifacts/abc123");
+});
+
+test("extractArtifactUrls: finds public artifact URL in text", () => {
+  const result = extractArtifactUrls([], "see https://claude.ai/public/artifacts/xyz789 for details");
+  expect(result).toHaveLength(1);
+  expect(result[0].url).toBe("https://claude.ai/public/artifacts/xyz789");
+});
+
+test("extractArtifactUrls: deduplicates same URL from tool_use and text", () => {
+  const url = "https://claude.ai/artifacts/dup001";
+  const toolUses = [{ name: "Artifact", input: { url } }];
+  const result = extractArtifactUrls(toolUses, `check ${url} above`);
+  expect(result).toHaveLength(1);
+});
+
+test("extractArtifactUrls: returns empty for no artifact URLs", () => {
+  expect(extractArtifactUrls([], "no urls here")).toHaveLength(0);
+  expect(extractArtifactUrls([{ name: "Read", input: { file_path: "/foo.ts" } }], "")).toHaveLength(0);
 });
 
 // ── extractSlackThreads ─────────────────────────────────────────────────────
@@ -252,6 +282,74 @@ test("syncLinks: upserts artifact links from session_files", async () => {
   await syncLinks(db, "s1");
   const links: any[] = db.query("SELECT * FROM links WHERE session_id='s1'").all();
   expect(links.some(l => l.kind === "artifact" && l.ref.includes("runbook.md"))).toBe(true);
+});
+
+test("syncLinks: upserts claude.ai artifact URL with url field set", async () => {
+  const path = "/tmp/cl-links-art-url.jsonl";
+  writeFileSync(
+    path,
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "Artifact",
+            input: { url: "https://claude.ai/artifacts/test-abc" },
+          },
+        ],
+      },
+    }) + "\n"
+  );
+  const db = openDb(":memory:");
+  makeSession(db, "s1", "session", path);
+  await syncLinks(db, "s1");
+  const link: any = db
+    .query("SELECT * FROM links WHERE session_id='s1' AND kind='artifact' AND ref='https://claude.ai/artifacts/test-abc'")
+    .get();
+  expect(link).not.toBeNull();
+  expect(link.url).toBe("https://claude.ai/artifacts/test-abc");
+  unlinkSync(path);
+});
+
+test("syncLinks: local file artifact has url=null", async () => {
+  const db = openDb(":memory:");
+  makeSession(db, "s1");
+  db.run("INSERT INTO session_files (session_id, path) VALUES ('s1', '/home/user/docs/guide.md')");
+  await syncLinks(db, "s1");
+  const link: any = db
+    .query("SELECT url FROM links WHERE session_id='s1' AND kind='artifact' AND ref='/home/user/docs/guide.md'")
+    .get();
+  expect(link).not.toBeNull();
+  expect(link.url).toBeNull();
+});
+
+test("syncLinks: dedupe for artifact URL on repeated calls", async () => {
+  const path = "/tmp/cl-links-art-dedupe.jsonl";
+  writeFileSync(
+    path,
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            name: "Artifact",
+            input: { url: "https://claude.ai/artifacts/dedup-xyz" },
+          },
+        ],
+      },
+    }) + "\n"
+  );
+  const db = openDb(":memory:");
+  makeSession(db, "s1", "session", path);
+  await syncLinks(db, "s1");
+  await syncLinks(db, "s1");
+  const count: any = db
+    .query("SELECT COUNT(*) as c FROM links WHERE session_id='s1' AND kind='artifact' AND ref='https://claude.ai/artifacts/dedup-xyz'")
+    .get();
+  expect(count.c).toBe(1);
+  unlinkSync(path);
 });
 
 test("syncLinks: deduplicates links on repeated calls", async () => {

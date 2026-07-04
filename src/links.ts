@@ -86,6 +86,45 @@ export function extractArtifacts(files: string[]): { path: string }[] {
     .map(path => ({ path }));
 }
 
+export function extractArtifactUrls(
+  toolUses: { name: string; input: Record<string, unknown> }[],
+  text: string
+): { url: string; title: string }[] {
+  const ARTIFACT_URL_RE = /https:\/\/claude\.ai\/(public\/)?artifacts\/[A-Za-z0-9_-]+/g;
+  const seen = new Set<string>();
+  const results: { url: string; title: string }[] = [];
+
+  // Scan tool uses where name matches /artifact/i
+  for (const tu of toolUses) {
+    if (!/artifact/i.test(tu.name)) continue;
+    // Check all string values in input for URLs
+    const inputTitle =
+      typeof tu.input.title === "string" ? tu.input.title :
+      typeof tu.input.label === "string" ? tu.input.label : null;
+    for (const val of Object.values(tu.input)) {
+      if (typeof val !== "string") continue;
+      for (const m of val.matchAll(ARTIFACT_URL_RE)) {
+        const url = m[0];
+        if (!seen.has(url)) {
+          seen.add(url);
+          results.push({ url, title: inputTitle ?? "Artifact" });
+        }
+      }
+    }
+  }
+
+  // Scan full text
+  for (const m of text.matchAll(ARTIFACT_URL_RE)) {
+    const url = m[0];
+    if (!seen.has(url)) {
+      seen.add(url);
+      results.push({ url, title: "Artifact" });
+    }
+  }
+
+  return results;
+}
+
 export function extractSlackThreads(
   toolUses: { name: string; input: Record<string, unknown> }[]
 ): { channel: string; thread_ts: string }[] {
@@ -150,10 +189,15 @@ export async function syncLinks(
   const prs = extractPRs(allText, cwd, gitRepoName);
   const linear = extractLinear(allText);
   const artifacts = extractArtifacts(files);
+  const artifactUrls = extractArtifactUrls(toolUses, digestText);
   const slackThreads = extractSlackThreads(toolUses);
 
   const upsert = db.prepare(
     `INSERT INTO links (session_id, kind, ref) VALUES (?,?,?)
+     ON CONFLICT(session_id, kind, ref) DO NOTHING`
+  );
+  const upsertWithUrl = db.prepare(
+    `INSERT INTO links (session_id, kind, ref, url, title) VALUES (?,?,?,?,?)
      ON CONFLICT(session_id, kind, ref) DO NOTHING`
   );
 
@@ -165,6 +209,9 @@ export async function syncLinks(
   }
   for (const art of artifacts) {
     upsert.run(sessionId, "artifact", art.path);
+  }
+  for (const art of artifactUrls) {
+    upsertWithUrl.run(sessionId, "artifact", art.url, art.url, art.title);
   }
   for (const slack of slackThreads) {
     const ref = `${slack.channel}:${slack.thread_ts}`;

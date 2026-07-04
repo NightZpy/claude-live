@@ -175,7 +175,21 @@ try {
   await seed("cdp-s-worker", { hook_event_name: "SessionStart", source: "startup" }, tmp, { CLAUDE_LIVE_SESSION_KIND: "worker" });
   await seed("cdp-s-worker", { hook_event_name: "UserPromptSubmit", prompt: "subagent task" }, tmp, { CLAUDE_LIVE_SESSION_KIND: "worker" });
 
-  console.log("Seeded: cdp-s-run (running+preview file), cdp-s-wait (waiting_input), cdp-s-arch (archived), cdp-s-task (task-notification), cdp-s-worker (worker)");
+  // cdp-s-art: unified files+artifacts session (file + deduped local artifact + external URL)
+  await seed("cdp-s-art", { hook_event_name: "SessionStart", source: "startup" }, tmp);
+  await seed("cdp-s-art", { hook_event_name: "UserPromptSubmit", prompt: "build the report" }, tmp);
+  await seed("cdp-s-art", {
+    hook_event_name: "PostToolUse",
+    tool_name: "Edit",
+    tool_input: { file_path: "/tmp/cdp-art-code.ts", old_string: "x", new_string: "y" },
+  }, tmp);
+  await seed("cdp-s-art", {
+    hook_event_name: "PostToolUse",
+    tool_name: "Edit",
+    tool_input: { file_path: "/tmp/cdp-art-note.md", old_string: "a", new_string: "b" },
+  }, tmp);
+
+  console.log("Seeded: cdp-s-run (running+preview file), cdp-s-wait (waiting_input), cdp-s-arch (archived), cdp-s-task (task-notification), cdp-s-worker (worker), cdp-s-art (unified files+artifacts)");
 
   // 1b. Seed summary + tasks directly into DB ───────────────────────────
   const seedDb = new Database(join(tmp, "claude-live.db"), { readwrite: true });
@@ -256,8 +270,18 @@ try {
     ["cdp-s-wait", "artifact", "/Users/u/proj/docs/runbook.md"]
   );
 
+  // cdp-s-art: local artifact (same path as session_file → dedupe) + external artifact URL
+  seedDb.run(
+    `INSERT OR IGNORE INTO links (session_id, kind, ref, url, title) VALUES (?,?,?,?,?)`,
+    ["cdp-s-art", "artifact", "/tmp/cdp-art-note.md", null, null]
+  );
+  seedDb.run(
+    `INSERT OR IGNORE INTO links (session_id, kind, ref, url, title) VALUES (?,?,?,?,?)`,
+    ["cdp-s-art", "artifact", "https://claude.ai/artifacts/testartifact123", "https://claude.ai/artifacts/testartifact123", "Test Report"]
+  );
+
   seedDb.close();
-  console.log("Seeded summary+tasks for cdp-s-wait, daily row for", todayDate, ", and Slack mentions+signals+links");
+  console.log("Seeded summary+tasks for cdp-s-wait, daily row for", todayDate, ", Slack mentions+signals+links, and cdp-s-art unified files+artifacts");
 
   // 2. Start server ─────────────────────────────────────────────────────
   console.log(`Starting server on port ${SERVER_PORT}...`);
@@ -326,8 +350,8 @@ try {
 
   // A1: 4 rows in #sessions — 3 regular active + 1 worker inside workers-group
   const a1 = await evaluate(cdp, "document.querySelectorAll('#sessions .srow').length");
-  if (a1 !== 4) fail(`A1: expected 4 session rows (3 regular + 1 worker), got ${a1}`);
-  console.log("✓ A1: 4 session rows (3 regular + 1 worker)");
+  if (a1 !== 5) fail(`A1: expected 5 session rows (4 regular + 1 worker), got ${a1}`);
+  console.log("✓ A1: 5 session rows (4 regular + 1 worker)");
 
   // A2: first row dot has class d-wait (waiting_input ordered before running)
   const a2 = await evaluate(cdp, "document.querySelector('#sessions .srow .dot').classList.contains('d-wait')");
@@ -380,8 +404,8 @@ try {
     cdp,
     "[...document.querySelectorAll('#sessions .srow')].filter(r => r.style.display !== 'none').length",
   );
-  if (a5b !== 4) fail(`A5b: expected 4 visible rows after clearing search (3 regular + 1 worker), got ${a5b}`);
-  console.log("✓ A5b: 4 visible rows after clearing search (3 regular + 1 worker)");
+  if (a5b !== 5) fail(`A5b: expected 5 visible rows after clearing search (4 regular + 1 worker), got ${a5b}`);
+  console.log("✓ A5b: 5 visible rows after clearing search (4 regular + 1 worker)");
 
   // A6: task-notification session row decodes correctly
   const a6topicText = await evaluate(
@@ -682,13 +706,24 @@ try {
   if (!g2) fail("G2: Linear section not found in detail panel");
   console.log("✓ G2: Linear section visible");
 
-  // G3: Artifacts section visible
-  const g3 = await evaluate(cdp,
-    `[...document.querySelectorAll('#d-body .dsec summary .lbl')]
-      .some(function(el) { return el.textContent.includes('Artifact') || el.textContent.includes('Artefact'); })`
+  // G3: artifacts are UNIFIED into the Files section (no separate Artifacts section).
+  // Open cdp-s-art (seeded with a file + a deduped local .md artifact + an external claude.ai artifact).
+  await evaluate(cdp, "document.querySelector('.srow[data-id=\"cdp-s-art\"]').click()");
+  await sleep(1000);
+  // expand all detail/file sections so collapsed content is queryable
+  await evaluate(cdp,
+    "[...document.querySelectorAll('#d-body details')].forEach(function(d){ d.open = true; })"
   );
-  if (!g3) fail("G3: Artifacts section not found in detail panel");
-  console.log("✓ G3: Artifacts section visible");
+  await sleep(200);
+  const g3link = await evaluate(cdp,
+    "!!document.querySelector('#d-body a[href*=\"claude.ai\"]')"
+  );
+  if (!g3link) fail("G3: claude.ai artifact external link not found in unified Files section");
+  const g3badge = await evaluate(cdp,
+    "[...document.querySelectorAll('#d-body .badge-sys')].some(function(el){ return el.textContent.indexOf('\\u2605') !== -1; })"
+  );
+  if (!g3badge) fail("G3: artifact ★ badge not found in unified Files section");
+  console.log("✓ G3: unified Files section shows artifact ★ badge + claude.ai link");
 
   console.log("✓ G1-G3: Links sections assertions passed");
 
