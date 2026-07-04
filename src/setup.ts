@@ -1,4 +1,4 @@
-import { readdirSync, existsSync, readFileSync, writeFileSync, mkdirSync, cpSync } from "node:fs";
+import { readdirSync, existsSync, readFileSync, writeFileSync, mkdirSync, cpSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -258,6 +258,35 @@ export function installLaunchd(repoRoot: string): string {
   return plistPath;
 }
 
+function defaultWhich(cmd: string): string | null {
+  try {
+    const result = Bun.spawnSync(["which", cmd], { stdout: "pipe" });
+    if (result.exitCode !== 0) return null;
+    const out = new TextDecoder().decode(result.stdout).trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveClaudeBin(
+  whichRunner: (cmd: string) => string | null = defaultWhich
+): string {
+  const found = whichRunner("claude");
+  if (found) return found;
+  const home = process.env.HOME ?? "";
+  const candidates = [
+    `${home}/.local/bin/claude`,
+    `${home}/.claude/local/claude`,
+    `/opt/homebrew/bin/claude`,
+    `/usr/local/bin/claude`,
+  ];
+  for (const p of candidates) {
+    try { statSync(p); return p; } catch { /* not found */ }
+  }
+  return "claude";
+}
+
 // CLI wizard — only runs when executed directly
 if (import.meta.main) {
   const args = process.argv.slice(2);
@@ -328,6 +357,7 @@ if (import.meta.main) {
   const cfg = loadConfig();
   cfg.language = lang;
   cfg.instances = confirmed;
+  cfg.claudeBin = resolveClaudeBin();
   saveConfig(cfg);
 
   if (launchd) {

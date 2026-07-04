@@ -367,6 +367,7 @@ test("runSummarizer processes sessions sequentially (no real CLI)", async () => 
 test("buildRunnerArgs contains disallowed tools and strict-mcp flags", () => {
   const args = buildRunnerArgs();
   const joined = args.join(" ");
+  expect(args[0]).toBe("claude");  // default bin
   expect(args).toContain("--disallowedTools");
   expect(joined).toContain("Bash");
   expect(joined).toContain("Edit");
@@ -375,6 +376,14 @@ test("buildRunnerArgs contains disallowed tools and strict-mcp flags", () => {
   expect(args).toContain("--mcp-config");
   const mcpIdx = args.indexOf("--mcp-config");
   expect(JSON.parse(args[mcpIdx + 1])).toEqual({ mcpServers: {} });
+});
+
+test("buildRunnerArgs uses custom bin as first element", () => {
+  const args = buildRunnerArgs("/abs/path/to/claude");
+  expect(args[0]).toBe("/abs/path/to/claude");
+  expect(args[1]).toBe("-p");
+  expect(args).toContain("--disallowedTools");
+  expect(args).toContain("--strict-mcp-config");
 });
 
 // --- Fix 2: nonce fence ---

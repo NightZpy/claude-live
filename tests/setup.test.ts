@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { detectInstances, installHooks, uninstallHooks, hookCommand, isOurs, deployApp } from "../src/setup";
+import { detectInstances, installHooks, uninstallHooks, hookCommand, isOurs, deployApp, resolveClaudeBin } from "../src/setup";
 
 function fakeHome() {
   const home = mkdtempSync(join(tmpdir(), "cl-setup-"));
@@ -181,6 +181,26 @@ test("hookCommand with space in repoRoot produces double-quoted parts and isOurs
   expect(cmd).toMatch(/^".*" ".*\/src\/hook\.ts"$/);
   // isOurs must recognize the quoted form
   expect(isOurs(cmd)).toBe(true);
+});
+
+test("resolveClaudeBin returns which output when which succeeds", () => {
+  const result = resolveClaudeBin(() => "/usr/local/bin/claude");
+  expect(result).toBe("/usr/local/bin/claude");
+});
+
+test("resolveClaudeBin falls back to known path when which fails", () => {
+  // Simulate which failing; resolveClaudeBin scans hardcoded candidates
+  const result = resolveClaudeBin(() => null);
+  // Returns one of the hardcoded candidates (if found on disk) or the "claude" sentinel
+  const home = process.env.HOME ?? "";
+  const validResults = [
+    "claude",
+    `${home}/.local/bin/claude`,
+    `${home}/.claude/local/claude`,
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+  ];
+  expect(validResults).toContain(result);
 });
 
 test("deployApp copies src, ui, package.json into homeDir/app and returns appDir", () => {

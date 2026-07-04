@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { LlmRunner } from "./summarizer";
+import { loadConfig } from "./config";
 
 export type SlackRunner = (prompt: string, allowedTools: string[]) => Promise<string>;
 
@@ -37,9 +38,10 @@ export const defaultRunner: SlackRunner = async (
   prompt: string,
   allowedTools: string[]
 ): Promise<string> => {
+  const bin = loadConfig().claudeBin ?? "claude";
   const proc = Bun.spawn(
     [
-      "claude", "-p",
+      bin, "-p",
       "--max-turns", "20",
       "--allowedTools", allowedTools.join(","),
     ],

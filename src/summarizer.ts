@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { readDigest } from "./transcript";
+import { loadConfig } from "./config";
 
 export type LlmRunner = (prompt: string) => Promise<string>;
 
@@ -11,9 +12,9 @@ export interface SessionRow {
 
 const VALID_STATUSES = new Set(["open", "in_progress", "done", "blocked", "delegated"]);
 
-export function buildRunnerArgs(): string[] {
+export function buildRunnerArgs(bin: string = "claude"): string[] {
   return [
-    "claude", "-p",
+    bin, "-p",
     "--model", "claude-haiku-4-5-20251001",
     "--max-turns", "1",
     "--disallowedTools", "Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Glob,Grep,WebFetch,WebSearch,Task,Agent,TodoWrite",
@@ -23,8 +24,9 @@ export function buildRunnerArgs(): string[] {
 }
 
 export const defaultRunner: LlmRunner = async (prompt: string): Promise<string> => {
+  const bin = loadConfig().claudeBin ?? "claude";
   const proc = Bun.spawn(
-    buildRunnerArgs(),
+    buildRunnerArgs(bin),
     {
       stdin: Buffer.from(prompt),
       stdout: "pipe",
