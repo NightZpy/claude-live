@@ -39,6 +39,10 @@ const I18N = {
     task_done: "hecha",
     task_blocked: "bloqueada",
     task_delegated: "delegada",
+    task_blocked_by: "bloqueada por",
+    task_delegated_to: "delegada a",
+    task_opened_at: "abierta",
+    task_closed_at: "cerrada",
     match_file: "archivo",
     match_event: "evento",
     match_session: "sesión",
@@ -130,6 +134,10 @@ const I18N = {
     task_done: "done",
     task_blocked: "blocked",
     task_delegated: "delegated",
+    task_blocked_by: "blocked by",
+    task_delegated_to: "delegated to",
+    task_opened_at: "opened",
+    task_closed_at: "closed",
     match_file: "file",
     match_event: "event",
     match_session: "session",
@@ -221,6 +229,10 @@ const I18N = {
     task_done: "feita",
     task_blocked: "bloqueada",
     task_delegated: "delegada",
+    task_blocked_by: "bloqueada por",
+    task_delegated_to: "delegada a",
+    task_opened_at: "aberta",
+    task_closed_at: "fechada",
     match_file: "arquivo",
     match_event: "evento",
     match_session: "sessão",
@@ -519,6 +531,11 @@ function fmtTime(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function fmtAbsDateTime(ts) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
 function archiveReasonLabel(reason) {
   if (!reason) return '';
   if (reason === 'exit' || reason === 'other') return t.reason_exit || t.reason_other || reason;
@@ -594,18 +611,63 @@ function taskStatusClass(status) {
 
 function buildTasksBody(tasks) {
   if (!tasks || tasks.length === 0) return '<div class="dim">—</div>';
-  return tasks.map(function(task) {
+  return tasks.map(function(task, idx) {
     var cls = taskStatusClass(task.status);
     var label = t['task_' + task.status] || task.status;
     var age = task.opened_at ? rel(task.opened_at) : '';
-    return '<div class="frow">' +
-      '<span class="' + esc(cls) + '">' + esc(label) + '</span>' +
-      '<span style="flex:1;padding:0 8px;overflow:hidden;text-overflow:ellipsis">' +
-        esc(task.title) +
-        (task.blocked_on ? ' <span class="dim">· ' + esc(task.blocked_on) + '</span>' : '') +
-      '</span>' +
-      '<span class="dim">' + esc(t.opened_ago || 'abierta') + ' ' + esc(age) + '</span>' +
-    '</div>';
+
+    var rowHtml =
+      '<div class="frow task-row" data-task-idx="' + idx + '" style="cursor:pointer">' +
+        '<span class="' + esc(cls) + '">' + esc(label) + '</span>' +
+        '<span style="flex:1;padding:0 8px;overflow:hidden;text-overflow:ellipsis">' +
+          '<span class="task-caret dim" style="margin-right:4px;font-size:10px">▶</span>' +
+          esc(task.title) +
+        '</span>' +
+        '<span class="dim">' + esc(t.opened_ago || 'abierta') + ' ' + esc(age) + '</span>' +
+      '</div>';
+
+    // Build expanded detail lines
+    var lines = [];
+
+    if (task.context) {
+      lines.push('<span class="dim" style="font-style:italic">' + esc(task.context) + '</span>');
+    }
+
+    if (task.blocked_on) {
+      var blockLabel = task.status === 'delegated'
+        ? (t.task_delegated_to || 'delegada a')
+        : (t.task_blocked_by || 'bloqueada por');
+      lines.push(
+        '<span class="dim">' + esc(blockLabel) + ': </span>' +
+        '<span>' + esc(task.blocked_on) + '</span>'
+      );
+    }
+
+    if (task.opened_at) {
+      lines.push(
+        '<span class="dim">' +
+          esc(t.task_opened_at || 'abierta') + ': ' +
+          esc(rel(task.opened_at)) + ' (' + esc(fmtAbsDateTime(task.opened_at)) + ')' +
+        '</span>'
+      );
+    }
+
+    if (task.closed_at && task.status === 'done') {
+      lines.push(
+        '<span class="dim">' +
+          esc(t.task_closed_at || 'cerrada') + ': ' +
+          esc(rel(task.closed_at)) + ' (' + esc(fmtAbsDateTime(task.closed_at)) + ')' +
+        '</span>'
+      );
+    }
+
+    var expandedHtml =
+      '<div class="task-expanded" data-task-idx="' + idx + '" hidden ' +
+        'style="padding:4px 8px 6px 32px;font-size:12px;line-height:1.8;border-bottom:1px solid #21262d">' +
+        (lines.length ? lines.join('<br>') : '<span class="dim">—</span>') +
+      '</div>';
+
+    return rowHtml + expandedHtml;
   }).join('');
 }
 
@@ -1411,6 +1473,19 @@ function openDetail(id) {
             .catch(function() {
               previewEl.innerHTML = '<span class="dim">' + esc(t.preview_error || 'error') + '</span>';
             });
+        });
+      });
+
+      // Task accordion click handlers
+      document.querySelectorAll('#d-body .task-row').forEach(function(taskRow) {
+        taskRow.addEventListener('click', function(e) {
+          e.stopPropagation();
+          var idx = taskRow.dataset.taskIdx;
+          var expanded = document.querySelector('#d-body .task-expanded[data-task-idx="' + idx + '"]');
+          if (!expanded) return;
+          expanded.hidden = !expanded.hidden;
+          var caret = taskRow.querySelector('.task-caret');
+          if (caret) caret.textContent = expanded.hidden ? '▶' : '▼';
         });
       });
 
