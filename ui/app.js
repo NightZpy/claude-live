@@ -68,6 +68,7 @@ const I18N = {
     links_repos: "Repos & PRs",
     links_linear: "Linear",
     links_artifacts: "Artefactos",
+    files_artifact_badge: "artefacto",
     settings_title: "Configuración",
     settings_language: "Idioma",
     settings_notify: "Notificar cuando Claude espera tu input",
@@ -163,6 +164,7 @@ const I18N = {
     links_repos: "Repos & PRs",
     links_linear: "Linear",
     links_artifacts: "Artifacts",
+    files_artifact_badge: "artifact",
     settings_title: "Settings",
     settings_language: "Language",
     settings_notify: "Notify when Claude is waiting for input",
@@ -258,6 +260,7 @@ const I18N = {
     links_repos: "Repos & PRs",
     links_linear: "Linear",
     links_artifacts: "Artefatos",
+    files_artifact_badge: "artefato",
     settings_title: "Configurações",
     settings_language: "Idioma",
     settings_notify: "Notificar quando Claude aguarda input",
@@ -1230,17 +1233,32 @@ function openDetail(id) {
           ' <span class="muted">' + esc(session.cwd || "") + "</span>" +
         "</div>";
 
-      var filesHint = files.length ? files.length + " " + t.files : "0";
+      var localArtifactLinks = artifactLinks.filter(function(l) { return !l.url; });
+      var externalArtifactLinks = artifactLinks.filter(function(l) { return !!l.url; });
+      var artifactPathSet = new Set(localArtifactLinks.map(function(l) { return l.ref; }));
+      var filePathSet = new Set(files.map(function(f) { return f.path; }));
+
+      var allLocalItems = files.map(function(f) {
+        return { path: f.path, change_kind: f.change_kind, ts: f.ts, isArtifact: artifactPathSet.has(f.path) };
+      });
+      localArtifactLinks.forEach(function(l) {
+        if (!filePathSet.has(l.ref)) {
+          allLocalItems.push({ path: l.ref, change_kind: null, ts: null, isArtifact: true });
+        }
+      });
+
+      var totalItems = allLocalItems.length + externalArtifactLinks.length;
+      var filesHint = totalItems ? totalItems + ' ' + t.files : '0';
       var session_cwd = session.cwd || '';
       var groups = new Map();
-      files.forEach(function(f) {
+      allLocalItems.forEach(function(f) {
         var g = fileGroup(f.path, session_cwd);
         if (!groups.has(g.dir)) groups.set(g.dir, { label: g.label, files: [] });
         groups.get(g.dir).files.push(f);
       });
-      var groupCount = groups.size;
+      var groupCount = groups.size + (externalArtifactLinks.length > 0 ? 1 : 0);
       var filesBody = '';
-      if (files.length === 0) {
+      if (totalItems === 0) {
         filesBody = '<div class="dim">—</div>';
       } else {
         groups.forEach(function(grp) {
@@ -1252,16 +1270,41 @@ function openDetail(id) {
           filesBody += '</summary>';
           grp.files.forEach(function(f) {
             var bn = basename(f.path);
+            var artBadge = f.isArtifact
+              ? ' <span class="badge-sys" title="' + esc(t.files_artifact_badge || 'artifact') + '">★</span>'
+              : '';
+            var actionHtml = f.change_kind != null
+              ? '<span class="badge-sys file-action">' + esc(f.change_kind) + '</span>'
+              : '';
+            var ageHtml = f.ts != null ? '<span class="dim">' + rel(f.ts) + '</span>' : '';
             filesBody +=
               '<div class="frow file-row" data-path="' + esc(f.path) + '" data-sid="' + esc(session.id) + '" style="cursor:pointer">' +
                 '<span class="file-bn">' + esc(bn) + '</span>' +
-                '<span class="badge-sys file-action">' + esc(f.change_kind) + '</span>' +
-                '<span class="dim">' + rel(f.ts) + '</span>' +
+                artBadge +
+                actionHtml +
+                ageHtml +
               '</div>' +
               '<div class="file-preview" data-path="' + esc(f.path) + '" hidden title="' + esc(f.path) + '"></div>';
           });
           filesBody += '</details>';
         });
+        if (externalArtifactLinks.length > 0) {
+          var extOpenAttr = groupCount <= 3 ? ' open' : '';
+          filesBody += '<details class="fgroup"' + extOpenAttr + '>';
+          filesBody += '<summary class="fgroup-summary"><span class="fgroup-dir">↗ ' + esc(t.files_artifact_badge || 'artifact') + '</span>';
+          filesBody += ' <span class="dim">(' + externalArtifactLinks.length + ')</span></summary>';
+          externalArtifactLinks.forEach(function(link) {
+            var label = esc(link.title && link.title !== 'Artifact' ? link.title : (basename(link.url) || 'Artifact'));
+            filesBody +=
+              '<div class="frow">' +
+                '<a href="' + esc(link.url) + '" target="_blank" rel="noopener" style="flex:1;overflow:hidden;text-overflow:ellipsis">' +
+                  '↗ ' + label +
+                '</a>' +
+                '<span class="badge-sys" title="' + esc(t.files_artifact_badge || 'artifact') + '">★</span>' +
+              '</div>';
+          });
+          filesBody += '</details>';
+        }
       }
 
       var lastEvent = events[0];
@@ -1379,19 +1422,6 @@ function openDetail(id) {
         linearSection = buildSection(t.links_linear || 'Linear', linearLinks.length + '', linBody, false);
       }
 
-      var artifactSection = '';
-      if (artifactLinks.length) {
-        var artBody = artifactLinks.map(function(link) {
-          var path = link.ref;
-          return '<div class="frow file-row" data-path="' + esc(path) + '" data-sid="' + esc(session.id) + '" style="cursor:pointer">' +
-              '<span class="file-bn">' + esc(basename(path)) + '</span>' +
-              '<span class="dim">' + esc(path) + '</span>' +
-            '</div>' +
-            '<div class="file-preview" data-path="' + esc(path) + '" hidden title="' + esc(path) + '"></div>';
-        }).join('');
-        artifactSection = buildSection(t.links_artifacts || 'Artifacts', artifactLinks.length + '', artBody, false);
-      }
-
       document.getElementById("d-body").innerHTML =
         statusLine +
         resumen +
@@ -1400,7 +1430,6 @@ function openDetail(id) {
         slackSection +
         (prLinks.length ? prSection : '') +
         (linearLinks.length ? linearSection : '') +
-        (artifactLinks.length ? artifactSection : '') +
         buildSection(t.files, filesHint, filesBody, false) +
         buildSection(t.events, eventsHint, eventsBody, true);
 
