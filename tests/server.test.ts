@@ -756,6 +756,54 @@ describe("/api/config", () => {
     srv.stop();
   });
 
+  // --- LLM gate 429 responses ---
+
+  test("POST /api/sessions/:id/summarize returns 429 when llmPaused=true", async () => {
+    // Write a transcript long enough to pass the 50-char digest check
+    const transcript = join(TMP_DIR, "paused-transcript.jsonl");
+    writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "x".repeat(100) } }) + "\n");
+    try {
+      saveConfig({ ...DEFAULT_CONFIG, llmPaused: true });
+      const db = openDb(":memory:");
+      const now = Date.now();
+      db.run(
+        "INSERT INTO sessions (id, instance, status, kind, started_at, last_activity, transcript_path) VALUES (?,?,?,?,?,?,?)",
+        ["pause-sess", "personal", "running", "session", now - 1000, now, transcript]
+      );
+      const srv = createServer(db, { port: 0 });
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/sessions/pause-sess/summarize`, { method: "POST" });
+      expect(res.status).toBe(429);
+      const body = await res.json() as any;
+      expect(body.error).toBe("llm_paused");
+      srv.stop();
+    } finally {
+      try { unlinkSync(transcript); } catch {}
+    }
+  });
+
+  test("GET /api/sessions/:id/resume-prompt returns 429 when llmPaused=true", async () => {
+    const transcript = join(TMP_DIR, "paused-resume-transcript.jsonl");
+    writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "x".repeat(100) } }) + "\n");
+    try {
+      saveConfig({ ...DEFAULT_CONFIG, llmPaused: true });
+      const db = openDb(":memory:");
+      const now = Date.now();
+      // No summary set — causes buildResumePromptRich to call summarizeOne
+      db.run(
+        "INSERT INTO sessions (id, instance, status, kind, started_at, last_activity, transcript_path) VALUES (?,?,?,?,?,?,?)",
+        ["pause-resume", "personal", "running", "session", now - 1000, now, transcript]
+      );
+      const srv = createServer(db, { port: 0 });
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/sessions/pause-resume/resume-prompt`);
+      expect(res.status).toBe(429);
+      const body = await res.json() as any;
+      expect(body.error).toBe("llm_paused");
+      srv.stop();
+    } finally {
+      try { unlinkSync(transcript); } catch {}
+    }
+  });
+
   test("two rapid POSTs to /api/deadlines produce distinct refs", async () => {
     const db = openDb(":memory:");
     const srv = createServer(db, { port: 0 });

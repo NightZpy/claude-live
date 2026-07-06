@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { LlmRunner } from "./summarizer";
-import { loadConfig } from "./config";
+import { loadConfig, type Config } from "./config";
+import { llmAllowed, runGated } from "./llm-gate";
 
 export type SlackRunner = (prompt: string, allowedTools: string[]) => Promise<string>;
 
@@ -328,7 +329,8 @@ export async function matchToSessions(
   db: Database,
   llmRunner: LlmRunner,
   language: string = "es",
-  now: number = Date.now()
+  now: number = Date.now(),
+  cfg?: Config,
 ): Promise<void> {
   const retryThreshold = now - 86_400_000;
   const unlinkedMentions = db
@@ -403,8 +405,11 @@ export async function matchToSessions(
 
   let raw: string;
   try {
-    raw = await llmRunner(prompt);
-  } catch {
+    raw = cfg
+      ? await runGated(db, cfg, 'match', () => llmRunner(prompt))
+      : await llmRunner(prompt);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) throw err;
     // Still stamp all ambiguous items so they aren't retried immediately
     for (const { table, id } of ambiguous) {
       db.run(`UPDATE ${table} SET match_attempted_at = ? WHERE id = ?`, [now, id]);
@@ -454,8 +459,14 @@ export async function runSlack(
   slackRunner: SlackRunner,
   llmRunner: LlmRunner,
   config: SlackConfig,
-  now: number
+  now: number,
+  cfg?: Config,
 ): Promise<void> {
+  if (cfg) {
+    const { allowed, reason } = llmAllowed(db, cfg, now);
+    if (!allowed) throw new Error('LLM_BLOCKED:' + reason);
+  }
+
   const alertChannels = config.slackChannelsAlerts ?? [];
   const deployChannels = config.slackChannelsDeploys ?? [];
   const language = config.language ?? "es";
@@ -468,5 +479,5 @@ export async function runSlack(
   for (const s of signals) upsertSignal(db, s, now);
 
   markResolvedHeuristic(db, now);
-  await matchToSessions(db, llmRunner, language, now);
+  await matchToSessions(db, llmRunner, language, now, cfg);
 }

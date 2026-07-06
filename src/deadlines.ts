@@ -2,6 +2,8 @@ import type { Database } from "bun:sqlite";
 import type { LlmRunner } from "./summarizer";
 import { readDigest } from "./transcript";
 import { syncLinearDeadlines } from "./linear";
+import type { Config } from "./config";
+import { runGated } from "./llm-gate";
 
 export type DeadlineSource = "linear" | "slack" | "manual" | "pr" | "in_session";
 
@@ -27,7 +29,7 @@ type MentionRow = {
   session_id: string | null;
 };
 
-export async function extractSlackDeadlines(db: Database, llmRunner: LlmRunner, now: number): Promise<void> {
+export async function extractSlackDeadlines(db: Database, llmRunner: LlmRunner, now: number, cfg?: Config): Promise<void> {
   const mentions = db.query("SELECT channel_id, thread_ts, author, text, ts, session_id FROM mentions WHERE deadline_checked_at IS NULL").all() as MentionRow[];
   for (const mention of mentions) {
     const text = mention.text ?? "";
@@ -52,8 +54,11 @@ export async function extractSlackDeadlines(db: Database, llmRunner: LlmRunner, 
 
     let raw: string;
     try {
-      raw = await llmRunner(prompt);
-    } catch {
+      raw = cfg
+        ? await runGated(db, cfg, 'deadline', () => llmRunner(prompt))
+        : await llmRunner(prompt);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) throw err;
       markChecked();
       continue;
     }
@@ -111,7 +116,7 @@ type LinkRow = {
   title: string | null;
 };
 
-async function processOneSessionDeadlines(db: Database, session: SessionRow, llmRunner: LlmRunner, now: number): Promise<void> {
+async function processOneSessionDeadlines(db: Database, session: SessionRow, llmRunner: LlmRunner, now: number, cfg?: Config): Promise<void> {
   if (!session.transcript_path) return;
   const digest = readDigest(session.transcript_path);
   if (!digest || !DATE_HINT_RE.test(digest)) return;
@@ -127,8 +132,11 @@ async function processOneSessionDeadlines(db: Database, session: SessionRow, llm
 
   let raw: string;
   try {
-    raw = await llmRunner(prompt);
-  } catch {
+    raw = cfg
+      ? await runGated(db, cfg, 'deadline', () => llmRunner(prompt))
+      : await llmRunner(prompt);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) throw err;
     return;
   }
 
@@ -156,7 +164,7 @@ async function processOneSessionDeadlines(db: Database, session: SessionRow, llm
   }, now);
 }
 
-export async function extractInSessionDeadlines(db: Database, llmRunner: LlmRunner, now: number): Promise<void> {
+export async function extractInSessionDeadlines(db: Database, llmRunner: LlmRunner, now: number, cfg?: Config): Promise<void> {
   const sessions = db.query(
     "SELECT id, transcript_path, instance, last_activity, deadline_checked_at FROM sessions WHERE status NOT IN ('ended','archived') AND (kind IS NULL OR kind != 'worker')"
   ).all() as SessionRow[];
@@ -167,12 +175,16 @@ export async function extractInSessionDeadlines(db: Database, llmRunner: LlmRunn
         session.deadline_checked_at >= session.last_activity) {
       continue;
     }
-    await processOneSessionDeadlines(db, session, llmRunner, now);
+    try {
+      await processOneSessionDeadlines(db, session, llmRunner, now, cfg);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) throw err;
+    }
     db.run("UPDATE sessions SET deadline_checked_at=? WHERE id=?", [now, session.id]);
   }
 }
 
-export async function extractInSessionDeadlinesForSession(db: Database, sessionId: string, llmRunner: LlmRunner, now: number): Promise<void> {
+export async function extractInSessionDeadlinesForSession(db: Database, sessionId: string, llmRunner: LlmRunner, now: number, cfg?: Config): Promise<void> {
   const session = db.query(
     "SELECT id, transcript_path, instance, last_activity, deadline_checked_at FROM sessions WHERE id=?"
   ).get(sessionId) as SessionRow | null;
@@ -182,7 +194,7 @@ export async function extractInSessionDeadlinesForSession(db: Database, sessionI
       session.deadline_checked_at >= session.last_activity) {
     return;
   }
-  await processOneSessionDeadlines(db, session, llmRunner, now);
+  await processOneSessionDeadlines(db, session, llmRunner, now, cfg);
   db.run("UPDATE sessions SET deadline_checked_at=? WHERE id=?", [now, session.id]);
 }
 
@@ -206,14 +218,14 @@ export function extractPRDeadlines(db: Database, now: number): void {
 
 export async function syncDeadlines(
   db: Database,
-  opts: { llmRunner?: LlmRunner; linearToken?: string },
+  opts: { llmRunner?: LlmRunner; linearToken?: string; cfg?: Config },
 ): Promise<void> {
   if (opts.linearToken) {
     try { await syncLinearDeadlines(db, opts.linearToken); } catch {}
   }
   if (opts.llmRunner) {
-    try { await extractSlackDeadlines(db, opts.llmRunner, Date.now()); } catch {}
-    try { await extractInSessionDeadlines(db, opts.llmRunner, Date.now()); } catch {}
+    try { await extractSlackDeadlines(db, opts.llmRunner, Date.now(), opts.cfg); } catch {}
+    try { await extractInSessionDeadlines(db, opts.llmRunner, Date.now(), opts.cfg); } catch {}
   }
   try { extractPRDeadlines(db, Date.now()); } catch {}
 }

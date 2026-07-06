@@ -63,6 +63,15 @@ const INBOX_SIGNALS_SQL = `
 
 const DEBOUNCE_MS = 60 * 60 * 1000;
 
+function llmBlockedResponse(err: unknown): Response | null {
+  if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) {
+    const reason = err.message.slice('LLM_BLOCKED:'.length);
+    const error = reason === 'paused' ? 'llm_paused' : 'llm_cap';
+    return Response.json({ error }, { status: 429 });
+  }
+  return null;
+}
+
 export function createServer(db: Database, opts: { port?: number; dailyRunner?: LlmRunner } = {}) {
   const cfg = loadConfig();
   const port = opts.port ?? Number(process.env.PORT ?? cfg.port);
@@ -137,7 +146,14 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           }
         }
         const runner = opts.dailyRunner ?? defaultRunner;
-        const result = await generateDaily(db, runner, cfg.language, Date.now());
+        let result: Awaited<ReturnType<typeof generateDaily>>;
+        try {
+          result = await generateDaily(db, runner, cfg.language, Date.now(), cfg);
+        } catch (err) {
+          const blocked = llmBlockedResponse(err);
+          if (blocked) return blocked;
+          return new Response("generation failed", { status: 500 });
+        }
         if (!result) return new Response("generation failed", { status: 500 });
         return Response.json(result);
       }
@@ -204,17 +220,25 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
       }
       const rm = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)\/resume-prompt$/);
       if (rm) {
-        const prompt = await buildResumePromptRich(db, rm[1], defaultRunner);
-        if (!prompt) return new Response("not found", { status: 404 });
-        return new Response(prompt, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+        try {
+          const prompt = await buildResumePromptRich(db, rm[1], defaultRunner, cfg);
+          if (!prompt) return new Response("not found", { status: 404 });
+          return new Response(prompt, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+        } catch (err) {
+          const blocked = llmBlockedResponse(err);
+          if (blocked) return blocked;
+          return new Response("not found", { status: 404 });
+        }
       }
       const sm = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)\/summarize$/);
       if (sm && req.method === "POST") {
         const session = db.query("SELECT * FROM sessions WHERE id = ?").get(sm[1]) as any;
         if (!session) return new Response("not found", { status: 404 });
         try {
-          await summarizeOne(db, session, defaultRunner, loadConfig().language);
-        } catch {
+          await summarizeOne(db, session, defaultRunner, loadConfig().language, cfg);
+        } catch (err) {
+          const blocked = llmBlockedResponse(err);
+          if (blocked) return blocked;
           return Response.json({ error: "summarize_failed" }, { status: 502 });
         }
         return Response.json(db.query("SELECT * FROM sessions WHERE id = ?").get(sm[1]));
@@ -419,22 +443,22 @@ if (import.meta.main) {
   enrichPRs(db, defaultGhRunner).catch(() => {});
   enrichLinear(db, cfg.linearToken).catch(() => {});
   const llmRunnerForDeadlines = cfg.summariesAuto === true ? defaultRunner : undefined;
-  syncDeadlines(db, { llmRunner: llmRunnerForDeadlines, linearToken: cfg.linearToken }).catch(() => {});
+  syncDeadlines(db, { llmRunner: llmRunnerForDeadlines, linearToken: cfg.linearToken, cfg }).catch(() => {});
   setInterval(() => {
     const liveCfg = loadConfig();
     try { runLinks(db); } catch {}
     enrichPRs(db, defaultGhRunner).catch(() => {});
     enrichLinear(db, liveCfg.linearToken).catch(() => {});
     const llmRunnerForDeadlines = liveCfg.summariesAuto === true ? defaultRunner : undefined;
-    syncDeadlines(db, { llmRunner: llmRunnerForDeadlines, linearToken: liveCfg.linearToken }).catch(() => {});
+    syncDeadlines(db, { llmRunner: llmRunnerForDeadlines, linearToken: liveCfg.linearToken, cfg: liveCfg }).catch(() => {});
   }, 300_000);
   setInterval(() => {
     const liveCfg = loadConfig();
-    if (liveCfg.summariesAuto === true) runSummarizer(db, defaultRunner, liveCfg.language).catch(() => {});
+    if (liveCfg.summariesAuto === true) runSummarizer(db, defaultRunner, liveCfg.language, liveCfg).catch(() => {});
   }, 3_600_000);
   setInterval(() => {
     const liveCfg = loadConfig();
-    if (liveCfg.slackAuto === true) runSlack(db, slackDefaultRunner, defaultRunner, liveCfg, Date.now()).catch(() => {});
+    if (liveCfg.slackAuto === true) runSlack(db, slackDefaultRunner, defaultRunner, liveCfg, Date.now(), liveCfg).catch(() => {});
   }, 1_800_000);
   const srv = createServer(db);
   console.log(`claude-live on http://localhost:${srv.port}`);

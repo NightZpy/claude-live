@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { defaultRunner, type LlmRunner } from "./summarizer";
+import type { Config } from "./config";
+import { runGated } from "./llm-gate";
 
 export interface DailyRow {
   date: string;
@@ -136,7 +138,8 @@ export async function generateDaily(
   db: Database,
   runner: LlmRunner = defaultRunner,
   language: string = "es",
-  now: number = Date.now()
+  now: number = Date.now(),
+  cfg?: Config,
 ): Promise<DailyRow | null> {
   const digest = buildDailyDigest(db, now);
   const date = dateKey(now);
@@ -145,8 +148,11 @@ export async function generateDaily(
 
   let raw: string;
   try {
-    raw = await runner(prompt);
-  } catch {
+    raw = cfg
+      ? await runGated(db, cfg, 'daily', () => runner(prompt))
+      : await runner(prompt);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) throw err;
     return null;
   }
 

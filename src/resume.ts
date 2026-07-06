@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { readDigest } from "./transcript";
 import { summarizeOne, type LlmRunner, type SessionRow } from "./summarizer";
+import type { Config } from "./config";
 
 function basename(path: string): string {
   return path.replace(/\/$/, "").split("/").pop() || path;
@@ -135,16 +136,18 @@ export function buildResumePrompt(db: Database, sessionId: string): string | nul
 export async function buildResumePromptRich(
   db: Database,
   sessionId: string,
-  runner: LlmRunner
+  runner: LlmRunner,
+  cfg?: Config,
 ): Promise<string | null> {
   const session = db.query("SELECT * FROM sessions WHERE id = ?").get(sessionId) as SessionRow | null;
   if (!session) return null;
 
   if (!session.summary) {
     try {
-      await summarizeOne(db, session, runner);
-    } catch {
-      // best-effort — ignore errors
+      await summarizeOne(db, session, runner, "es", cfg);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) throw err;
+      // best-effort — ignore other errors
     }
   }
 

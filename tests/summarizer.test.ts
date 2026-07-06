@@ -3,6 +3,7 @@ import { writeFileSync, unlinkSync } from "node:fs";
 import type { Database } from "bun:sqlite";
 import { openDb } from "../src/db";
 import { pickSessions, summarizeOne, runSummarizer, buildRunnerArgs, buildPrompt, type LlmRunner } from "../src/summarizer";
+import { DEFAULT_CONFIG } from "../src/config";
 
 const FAKE_TRANSCRIPT = "/tmp/cl-summarizer-test-transcript.jsonl";
 
@@ -535,4 +536,61 @@ test("tasks table has blocked_on column", () => {
   );
   const row = db.query("SELECT blocked_on FROM tasks WHERE session_id='s1'").get() as any;
   expect(row.blocked_on).toBe("eng");
+});
+
+// --- LLM gate ---
+
+test("summarizeOne with llmPaused=true throws LLM_BLOCKED", async () => {
+  makeFakeTranscript();
+  try {
+    const db = openDb(":memory:");
+    insertSession(db, { id: "s1", transcript_path: FAKE_TRANSCRIPT });
+    const session = db.query("SELECT * FROM sessions WHERE id='s1'").get() as any;
+    const pausedCfg = { ...DEFAULT_CONFIG, llmPaused: true };
+    let threw = false;
+    try {
+      await summarizeOne(db, session, fakeRunner, "es", pausedCfg);
+    } catch (err) {
+      threw = true;
+      expect(err instanceof Error).toBe(true);
+      expect((err as Error).message.startsWith('LLM_BLOCKED:')).toBe(true);
+    }
+    expect(threw).toBe(true);
+  } finally {
+    cleanFakeTranscript();
+  }
+});
+
+test("summarizeOne without cfg does not throw even when runner returns valid JSON", async () => {
+  makeFakeTranscript();
+  try {
+    const db = openDb(":memory:");
+    insertSession(db, { id: "s1", transcript_path: FAKE_TRANSCRIPT });
+    const session = db.query("SELECT * FROM sessions WHERE id='s1'").get() as any;
+    // No cfg passed — gate is skipped entirely
+    await expect(summarizeOne(db, session, fakeRunner, "es")).resolves.toBeUndefined();
+  } finally {
+    cleanFakeTranscript();
+  }
+});
+
+test("runSummarizer stops loop on LLM_BLOCKED and returns partial count", async () => {
+  makeFakeTranscript();
+  try {
+    const db = openDb(":memory:");
+    db.run(
+      "INSERT INTO sessions (id, instance, status, kind, started_at, last_activity, transcript_path) VALUES ('s1', 'p', 'running', 'session', 1, 2000, ?)",
+      [FAKE_TRANSCRIPT]
+    );
+    db.run(
+      "INSERT INTO sessions (id, instance, status, kind, started_at, last_activity, transcript_path) VALUES ('s2', 'p', 'running', 'session', 1, 2000, ?)",
+      [FAKE_TRANSCRIPT]
+    );
+    const pausedCfg = { ...DEFAULT_CONFIG, llmPaused: true };
+    // With paused cfg, the first session throws LLM_BLOCKED and the loop breaks (count=0)
+    const count = await runSummarizer(db, fakeRunner, "es", pausedCfg);
+    expect(count).toBe(0);
+  } finally {
+    cleanFakeTranscript();
+  }
 });
