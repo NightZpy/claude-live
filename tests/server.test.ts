@@ -962,4 +962,94 @@ describe("/api/config", () => {
     expect(body.llmDailyCap).toBe(1);
     srv.stop();
   });
+
+  // --- /api/usage ---
+
+  test("GET /api/usage basic shape: fresh db returns expected fields", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/usage`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.today.total).toBe(0);
+    expect(body.today.byKind).toEqual({});
+    expect(body.week.total).toBe(0);
+    expect(body.lastCall).toBeNull();
+    expect(body.cap).toBe(100);
+    expect(body.remaining).toBe(100);
+    expect(body.paused).toBe(false);
+    srv.stop();
+  });
+
+  test("GET /api/usage with rows: reflects inserted llm_calls", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const startOfToday = now - (now % 86400000);
+    db.run("INSERT INTO llm_calls (ts, kind, model, ok) VALUES (?, 'summary', 'claude-3-opus', 1)", [startOfToday + 1000]);
+    db.run("INSERT INTO llm_calls (ts, kind, model, ok) VALUES (?, 'summary', 'claude-3-opus', 1)", [startOfToday + 2000]);
+    db.run("INSERT INTO llm_calls (ts, kind, model, ok) VALUES (?, 'generate', 'claude-3-haiku', 0)", [startOfToday + 3000]);
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/usage`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.today.total).toBe(3);
+    expect(body.today.byKind.summary).toBe(2);
+    expect(body.today.byKind.generate).toBe(1);
+    expect(body.lastCall).not.toBeNull();
+    expect(body.lastCall.kind).toBe("generate");
+    expect(body.lastCall.model).toBe("claude-3-haiku");
+    expect(body.lastCall.ok).toBe(false);
+    srv.stop();
+  });
+
+  test("POST /api/llm/pause flips paused to true and returns usage", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/llm/pause`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.paused).toBe(true);
+    const getRes = await fetch(`http://127.0.0.1:${srv.port}/api/usage`);
+    const getBody = await getRes.json() as any;
+    expect(getBody.paused).toBe(true);
+    srv.stop();
+  });
+
+  test("POST /api/llm/resume flips paused to false and returns usage", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    // First pause
+    await fetch(`http://127.0.0.1:${srv.port}/api/llm/pause`, { method: "POST" });
+    // Then resume
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/llm/resume`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.paused).toBe(false);
+    const getRes = await fetch(`http://127.0.0.1:${srv.port}/api/usage`);
+    const getBody = await getRes.json() as any;
+    expect(getBody.paused).toBe(false);
+    srv.stop();
+  });
+
+  test("GET /api/usage remaining calculation with custom cap and calls", async () => {
+    saveConfig({ ...DEFAULT_CONFIG, llmDailyCap: 5 });
+    try {
+      const db = openDb(":memory:");
+      const now = Date.now();
+      const startOfToday = now - (now % 86400000);
+      db.run("INSERT INTO llm_calls (ts, kind, model, ok) VALUES (?, 'summary', 'claude-3-opus', 1)", [startOfToday + 1000]);
+      db.run("INSERT INTO llm_calls (ts, kind, model, ok) VALUES (?, 'summary', 'claude-3-opus', 1)", [startOfToday + 2000]);
+      db.run("INSERT INTO llm_calls (ts, kind, model, ok) VALUES (?, 'generate', 'claude-3-haiku', 1)", [startOfToday + 3000]);
+      const srv = createServer(db, { port: 0 });
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/usage`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect(body.cap).toBe(5);
+      expect(body.today.total).toBe(3);
+      expect(body.remaining).toBe(2);
+      srv.stop();
+    } finally {
+      saveConfig(DEFAULT_CONFIG);
+    }
+  });
 });

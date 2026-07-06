@@ -63,6 +63,43 @@ const INBOX_SIGNALS_SQL = `
 
 const DEBOUNCE_MS = 60 * 60 * 1000;
 
+function buildUsagePayload(db: Database, cfg: any, now: number): object {
+  const startOfToday = now - (now % 86400000);
+  const startOfWeek = startOfToday - 7 * 86400000;
+
+  type KindRow = { kind: string; cnt: number };
+  const todayRows = db.query(
+    "SELECT kind, COUNT(*) as cnt FROM llm_calls WHERE ts > ? GROUP BY kind"
+  ).all(startOfToday) as KindRow[];
+
+  const byKind: Record<string, number> = {};
+  let todayTotal = 0;
+  for (const row of todayRows) {
+    byKind[row.kind] = row.cnt;
+    todayTotal += row.cnt;
+  }
+
+  type CountRow = { total: number };
+  const weekRow = db.query(
+    "SELECT COUNT(*) as total FROM llm_calls WHERE ts > ?"
+  ).get(startOfWeek) as CountRow;
+
+  type LastRow = { ts: number; kind: string; model: string | null; ok: number };
+  const lastRow = db.query(
+    "SELECT ts, kind, model, ok FROM llm_calls ORDER BY ts DESC LIMIT 1"
+  ).get() as LastRow | null;
+
+  const cap = cfg.llmDailyCap ?? 100;
+  return {
+    today: { total: todayTotal, byKind },
+    week: { total: weekRow.total },
+    lastCall: lastRow ? { ts: lastRow.ts, kind: lastRow.kind, model: lastRow.model, ok: lastRow.ok === 1 } : null,
+    cap,
+    remaining: Math.max(0, cap - todayTotal),
+    paused: cfg.llmPaused ?? false,
+  };
+}
+
 function llmBlockedResponse(err: unknown): Response | null {
   if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) {
     const reason = err.message.slice('LLM_BLOCKED:'.length);
@@ -379,6 +416,22 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           llmPaused: c.llmPaused ?? false,
           llmDailyCap: c.llmDailyCap ?? 100,
         });
+      }
+      if (url.pathname === "/api/usage" && req.method === "GET") {
+        const freshCfg = loadConfig();
+        return Response.json(buildUsagePayload(db, freshCfg, Date.now()));
+      }
+      if (url.pathname === "/api/llm/pause" && req.method === "POST") {
+        const freshCfg = loadConfig();
+        freshCfg.llmPaused = true;
+        saveConfig(freshCfg);
+        return Response.json(buildUsagePayload(db, freshCfg, Date.now()));
+      }
+      if (url.pathname === "/api/llm/resume" && req.method === "POST") {
+        const freshCfg = loadConfig();
+        freshCfg.llmPaused = false;
+        saveConfig(freshCfg);
+        return Response.json(buildUsagePayload(db, freshCfg, Date.now()));
       }
       if (url.pathname === "/api/deadlines" && req.method === "GET") {
         const rows = db.query(
