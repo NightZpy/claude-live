@@ -386,7 +386,7 @@ test("/api/inbox returns mentions and signals arrays", async () => {
     `INSERT INTO mentions (channel_id, channel_name, thread_ts, author, author_id, participants, text, ts,
        ask_count, resolved, first_at, last_at)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-    ["C1", "general", "ts1", "Alice", "U1", "[]", "hey Lenyn", "ts1", 1, 0, now - 1000, now - 1000]
+    ["C1", "general", "ts1", "Alice", "U1", "[]", "hey Sam", "ts1", 1, 0, now - 1000, now - 1000]
   );
   db.run(
     "INSERT INTO signals (kind, channel, text, ts, created_at) VALUES (?,?,?,?,?)",

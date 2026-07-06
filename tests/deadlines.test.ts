@@ -47,7 +47,7 @@ test("extractSlackDeadlines stores a low-confidence slack deadline", async () =>
 
 test("extractSlackDeadlines skips mentions with no date-ish text (no LLM call)", async () => {
   const db = openDb(":memory:");
-  db.run("INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved) VALUES ('C1','t','Jordan','thanks lenyn','100',1,0)");
+  db.run("INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved) VALUES ('C1','t','Jordan','thanks sam','100',1,0)");
   let calls = 0;
   await extractSlackDeadlines(db, async () => { calls++; return "{}"; }, Date.now());
   expect(calls).toBe(0);
@@ -151,7 +151,7 @@ test("extractSlackDeadlines processes mention once then never again (call-count 
 test("extractSlackDeadlines: re-ask (upsertMention newer ts) resets deadline_checked_at and allows one more pass", async () => {
   const { upsertMention } = await import("../src/slack");
   const db = openDb(":memory:");
-  db.run("INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved) VALUES ('C2','T100','Jordan','deliver by Friday?','T100',1,0)");
+  db.run("INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved) VALUES ('C2','100.000001','Jordan','deliver by Friday?','100.000001',1,0)");
   let calls = 0;
   const fake = async () => { calls++; return JSON.stringify({ due_at: 1783900800000, estimate_hours: null, title: "T" }); };
 
@@ -162,8 +162,8 @@ test("extractSlackDeadlines: re-ask (upsertMention newer ts) resets deadline_che
   await extractSlackDeadlines(db, fake, Date.now());
   expect(calls).toBe(1);
 
-  // Simulate re-ask: same thread (thread_ts=T100) but new message ts
-  upsertMention(db, { channel: "C2", channel_id: "C2", thread_ts: "T100", author: "Jordan", text: "deliver by Friday please?", ts: "T200" }, Date.now());
+  // Simulate re-ask: same thread (thread_ts=100.000001) but new message ts
+  upsertMention(db, { channel: "C2", channel_id: "C2", thread_ts: "100.000001", author: "Jordan", text: "deliver by Friday please?", ts: "200.000001" }, Date.now());
 
   // Third run — deadline_checked_at was reset, so it runs again
   await extractSlackDeadlines(db, fake, Date.now());

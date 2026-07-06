@@ -207,11 +207,15 @@ export function upsertMention(db: Database, raw: RawMention, now: number): void 
   const sameThread = db
     .query("SELECT id, ts FROM mentions WHERE channel_id=? AND thread_ts=? AND author=?")
     .get(channel, threadTs, raw.author) as ExRow | null;
-  if (sameThread && raw.ts > (sameThread.ts ?? "")) {
-    db.run(
-      `UPDATE mentions SET text=?, ts=?, last_at=?, deadline_checked_at=NULL WHERE id=?`,
-      [raw.text, raw.ts, now, sameThread.id]
-    );
+  if (sameThread) {
+    const rawTs = parseFloat(raw.ts);
+    const sameTs = parseFloat(sameThread.ts ?? "");
+    if (!isNaN(rawTs) && !isNaN(sameTs) && rawTs > sameTs) {
+      db.run(
+        `UPDATE mentions SET text=?, ts=?, last_at=?, deadline_checked_at=NULL WHERE id=?`,
+        [raw.text, raw.ts, now, sameThread.id]
+      );
+    }
     return;
   }
 
@@ -262,7 +266,7 @@ export function markResolvedHeuristic(db: Database, now: number): void {
      WHERE resolved = 0
        AND resolved_manual IS NULL
        AND (
-         LOWER(COALESCE(author, '')) LIKE '%lenyn%'
+         LOWER(COALESCE(author, '')) LIKE '%sam%'
          OR last_at < ?
        )`,
     [cutoff24h]

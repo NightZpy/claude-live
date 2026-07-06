@@ -23,7 +23,7 @@ import type { LlmRunner } from "../src/summarizer";
 function makeMention(overrides: Partial<RawMention> = {}): RawMention {
   return {
     channel: "C001",
-    author: "Lenyn",
+    author: "Sam",
     text: "Can you check this PR?",
     ts: "1751000000.000001",
     ...overrides,
@@ -76,13 +76,13 @@ test("buildSlackArgs pins model to haiku and limits max-turns to 12", () => {
 
 test("fetchMentions parses canned JSON array from runner", async () => {
   const canned: RawMention[] = [
-    makeMention({ text: "hey Lenyn can you review this?" }),
-    makeMention({ channel: "C002", ts: "1751000001.000002", text: "Lenyn are you around?" }),
+    makeMention({ text: "hey Sam can you review this?" }),
+    makeMention({ channel: "C002", ts: "1751000001.000002", text: "Sam are you around?" }),
   ];
   const runner: SlackRunner = async () => JSON.stringify(canned);
   const result = await fetchMentions(runner, Date.now() - 3600_000, "Sam");
   expect(result).toHaveLength(2);
-  expect(result[0].text).toBe("hey Lenyn can you review this?");
+  expect(result[0].text).toBe("hey Sam can you review this?");
   expect(result[1].channel).toBe("C002");
 });
 
@@ -118,7 +118,7 @@ test("fetchMentions returns [] when runner throws (no throw)", async () => {
 
 test("fetchMentions filters out items missing required fields", async () => {
   const mixed = [
-    { channel: "C001", author: "Lenyn", text: "ok", ts: "ts1" },
+    { channel: "C001", author: "Sam", text: "ok", ts: "ts1" },
     { channel: "C002", text: "missing author and ts" },
     null,
     "garbage",
@@ -390,7 +390,7 @@ test("upsertSignal stores optional status field", () => {
 test("markResolvedHeuristic does not resolve recent mention (within 24h)", () => {
   const db = openDb(":memory:");
   const now = 1_000_000_000_000;
-  upsertMention(db, makeMention({ author: "Alice", channel: "C-recent" }), now - 3_600_000); // 1h ago, non-Lenyn author
+  upsertMention(db, makeMention({ author: "Alice", channel: "C-recent" }), now - 3_600_000); // 1h ago, non-Sam author
   markResolvedHeuristic(db, now);
   const row = db.query("SELECT resolved FROM mentions WHERE channel_id='C-recent'").get() as any;
   expect(row.resolved).toBe(0);
@@ -405,10 +405,10 @@ test("markResolvedHeuristic resolves mention older than 24h", () => {
   expect(row.resolved).toBe(1);
 });
 
-test("markResolvedHeuristic resolves mention whose author contains 'lenyn'", () => {
+test("markResolvedHeuristic resolves mention whose author contains 'sam'", () => {
   const db = openDb(":memory:");
   const now = 1_000_000_000_000;
-  upsertMention(db, makeMention({ author: "Lenyn Alcantara" }), now - 3_600_000); // recent
+  upsertMention(db, makeMention({ author: "Sam Alcantara" }), now - 3_600_000); // recent
   markResolvedHeuristic(db, now);
   const row = db.query("SELECT resolved FROM mentions WHERE channel_id='C001'").get() as any;
   expect(row.resolved).toBe(1);
@@ -528,7 +528,7 @@ test("runSlack sequences fetch → upsert → heuristic → match (fake runners,
   const db = openDb(":memory:");
   const now = 1_000_000_000_000;
 
-  const mention: RawMention = makeMention({ text: "hey Lenyn can you check this?" });
+  const mention: RawMention = makeMention({ text: "hey Sam can you check this?" });
   const signal: RawSignal = makeSignal();
 
   const slackRunner: SlackRunner = async (prompt) => {
@@ -635,7 +635,6 @@ test("fetchMentions prompt uses configured mentionName", async () => {
   const runner: SlackRunner = async (prompt) => { capturedPrompt = prompt; return "[]"; };
   await fetchMentions(runner, Date.now(), "Sam");
   expect(capturedPrompt).toContain("Sam");
-  expect(capturedPrompt).not.toContain("Lenyn");
 });
 
 // --- matchToSessions one-shot via match_attempted_at ---

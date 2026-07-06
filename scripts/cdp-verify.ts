@@ -235,7 +235,7 @@ try {
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ["C-CDP1", "general", "1751000001.000001", "Alice", "U001",
      JSON.stringify(["U001", "U002"]),
-     "Hey Lenyn can you review this PR?", "1751000001.000001",
+     "Hey Sam can you review this PR?", "1751000001.000001",
      1, 0, nowMs - 300_000, nowMs - 300_000, "cdp-s-wait"]
   );
   seedDb.run(
@@ -244,7 +244,7 @@ try {
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
     ["C-CDP2", "backend", "1751000002.000001", "Bob", "U002",
      JSON.stringify(["U002"]),
-     "Lenyn are you around? Any update?", "1751000002.000001",
+     "Sam are you around? Any update?", "1751000002.000001",
      2, 0, nowMs - 600_000, nowMs - 100_000]
   );
   // seed signal linked to cdp-s-wait
