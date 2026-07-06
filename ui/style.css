@@ -550,7 +550,7 @@ html, body {
 }
 .sfield { margin-bottom: 16px; }
 .sfield label { display: block; color: #8b949e; font-size: 11px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .1em; }
-.sfield select, .sfield input[type="text"], .sfield input[type="password"] {
+.sfield select, .sfield input[type="text"], .sfield input[type="password"], .sfield input[type="number"] {
   width: 100%;
   background: #010409;
   border: 1px solid #21262d;
@@ -561,7 +561,7 @@ html, body {
   font-size: inherit;
   outline: none;
 }
-.sfield select:focus, .sfield input[type="text"]:focus, .sfield input[type="password"]:focus { border-color: #58a6ff; }
+.sfield select:focus, .sfield input[type="text"]:focus, .sfield input[type="password"]:focus, .sfield input[type="number"]:focus { border-color: #58a6ff; }
 .scheck { display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 10px; }
 .scheck input[type="checkbox"] { width: 14px; height: 14px; accent-color: #3fb950; cursor: pointer; }
 .scheck span { color: #c9d1d9; }
@@ -636,3 +636,40 @@ html, body {
 .ev-chip.active { border-color: #388bfd55; color: #58a6ff; background: #388bfd12; }
 .ev-chip-solo { border-style: dashed; }
 .ev-kind { white-space: nowrap; flex: none; }
+
+/* refresh button (topbar, next to gear) */
+#refresh-btn {
+  flex: none;
+  background: none;
+  border: 1px solid #21262d;
+  border-radius: 6px;
+  color: #c9d1d9;
+  cursor: pointer;
+  font-size: 15px;
+  padding: 5px 8px;
+  line-height: 1;
+}
+#refresh-btn:hover { border-color: #3fb950; color: #3fb950; }
+#refresh-btn:disabled { opacity: .5; cursor: default; }
+
+/* paused banner */
+#paused-banner {
+  background: #d2992222;
+  border-bottom: 1px solid #d2992255;
+  color: #d29922;
+  font-size: 11px;
+  letter-spacing: .08em;
+  padding: 5px 16px;
+  text-align: center;
+}
+#paused-banner[hidden] { display: none; }
+
+/* usage section */
+.usage-paused-badge {
+  border-color: #d2992255;
+  color: #d29922;
+  font-size: 9px;
+  padding: 0 5px;
+}
+.usage-action-btn { margin-top: 4px; font-size: 11px; padding: 4px 8px; }
+.usage-stop-btn:hover { border-color: #f85149; color: #f85149; }
