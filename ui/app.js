@@ -74,6 +74,7 @@ const I18N = {
     settings_notify: "Notificar cuando Claude espera tu input",
     settings_summaries_auto: "Resúmenes automáticos",
     settings_daily_auto: "Daily automático",
+    settings_slack_auto: "Slack automático",
     settings_alerts: "Canales de alertas (separados por coma)",
     settings_deploys: "Canales de deploys (separados por coma)",
     settings_instances: "Instancias activas",
@@ -170,6 +171,7 @@ const I18N = {
     settings_notify: "Notify when Claude is waiting for input",
     settings_summaries_auto: "Auto summaries",
     settings_daily_auto: "Auto daily",
+    settings_slack_auto: "Auto Slack",
     settings_alerts: "Alert channels (comma-separated)",
     settings_deploys: "Deploy channels (comma-separated)",
     settings_instances: "Active instances",
@@ -266,6 +268,7 @@ const I18N = {
     settings_notify: "Notificar quando Claude aguarda input",
     settings_summaries_auto: "Resumos automáticos",
     settings_daily_auto: "Daily automático",
+    settings_slack_auto: "Slack automático",
     settings_alerts: "Canais de alertas (separados por vírgula)",
     settings_deploys: "Canais de deploys (separados por vírgula)",
     settings_instances: "Instâncias ativas",
@@ -1617,6 +1620,7 @@ function openSettings() {
         chk('s-notify', 'settings_notify', cfg.notifyWaiting) +
         chk('s-summaries', 'settings_summaries_auto', cfg.summariesAuto) +
         chk('s-daily', 'settings_daily_auto', cfg.dailyAuto) +
+        chk('s-slack-auto', 'settings_slack_auto', cfg.slackAuto) +
         '<div class="sfield">' +
           '<label>' + esc(t.settings_alerts || 'Alert channels') + '</label>' +
           '<input type="text" id="s-alerts" value="' + esc((cfg.slackChannelsAlerts || []).join(', ')) + '">' +
@@ -1675,6 +1679,9 @@ function saveSettings() {
 
   var dailyEl = document.getElementById('s-daily');
   if (dailyEl) payload.dailyAuto = dailyEl.checked;
+
+  var slackAutoEl = document.getElementById('s-slack-auto');
+  if (slackAutoEl) payload.slackAuto = slackAutoEl.checked;
 
   var alertsEl = document.getElementById('s-alerts');
   if (alertsEl) {

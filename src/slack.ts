@@ -34,6 +34,10 @@ export const SLACK_ALLOWED_TOOLS = [
   "mcp__claude_ai_Slack__slack_read_channel",
 ];
 
+export function buildSlackArgs(bin: string): string[] {
+  return [bin, "-p", "--model", "claude-haiku-4-5-20251001", "--max-turns", "12"];
+}
+
 export const defaultRunner: SlackRunner = async (
   prompt: string,
   allowedTools: string[]
@@ -41,11 +45,7 @@ export const defaultRunner: SlackRunner = async (
   const cfg = loadConfig();
   const bin = cfg.claudeBin ?? "claude";
   const proc = Bun.spawn(
-    [
-      bin, "-p",
-      "--max-turns", "20",
-      "--allowedTools", allowedTools.join(","),
-    ],
+    [...buildSlackArgs(bin), "--allowedTools", allowedTools.join(",")],
     {
       stdin: Buffer.from(prompt),
       stdout: "pipe",
@@ -90,8 +90,7 @@ async function runWithRetry(
   if (raw.includes(SLACK_UNAVAILABLE)) return raw;
 
   const arr = parseJsonArray(raw);
-  const needsRetry =
-    raw.includes("Reached max turns") || arr === null || arr.length === 0;
+  const needsRetry = raw.includes("Reached max turns") || arr === null;
 
   if (!needsRetry) return raw;
 

@@ -229,8 +229,9 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           language: c.language,
           port: c.port,
           notifyWaiting: c.notifyWaiting ?? true,
-          summariesAuto: c.summariesAuto ?? true,
-          dailyAuto: c.dailyAuto ?? true,
+          summariesAuto: c.summariesAuto === true,
+          dailyAuto: c.dailyAuto === true,
+          slackAuto: c.slackAuto === true,
           slackChannelsAlerts: c.slackChannelsAlerts ?? [],
           slackChannelsDeploys: c.slackChannelsDeploys ?? [],
           slackTokenSet: tokenSet,
@@ -269,6 +270,9 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         }
         if ("dailyAuto" in patch && typeof patch.dailyAuto === "boolean") {
           current.dailyAuto = patch.dailyAuto;
+        }
+        if ("slackAuto" in patch && typeof patch.slackAuto === "boolean") {
+          current.slackAuto = patch.slackAuto;
         }
         if ("slackChannelsAlerts" in patch && Array.isArray(patch.slackChannelsAlerts) &&
             (patch.slackChannelsAlerts as unknown[]).every(x => typeof x === "string")) {
@@ -320,8 +324,9 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           language: c.language,
           port: c.port,
           notifyWaiting: c.notifyWaiting ?? true,
-          summariesAuto: c.summariesAuto ?? true,
-          dailyAuto: c.dailyAuto ?? true,
+          summariesAuto: c.summariesAuto === true,
+          dailyAuto: c.dailyAuto === true,
+          slackAuto: c.slackAuto === true,
           slackChannelsAlerts: c.slackChannelsAlerts ?? [],
           slackChannelsDeploys: c.slackChannelsDeploys ?? [],
           slackTokenSet: tokenSet,
@@ -405,28 +410,27 @@ if (import.meta.main) {
     const liveCfg = loadConfig();
     checkNotifications(db, liveCfg.notifyWaiting !== false ? notify : () => {});
   }, 60_000);
-  if (cfg.summariesAuto !== false) runSummarizer(db, defaultRunner, cfg.language).catch(() => {});
   runLinks(db);
   enrichPRs(db, defaultGhRunner).catch(() => {});
   enrichLinear(db, cfg.linearToken).catch(() => {});
-  syncDeadlines(db, { llmRunner: defaultRunner, linearToken: cfg.linearToken }).catch(() => {});
+  const llmRunnerForDeadlines = cfg.summariesAuto === true ? defaultRunner : undefined;
+  syncDeadlines(db, { llmRunner: llmRunnerForDeadlines, linearToken: cfg.linearToken }).catch(() => {});
   setInterval(() => {
     const liveCfg = loadConfig();
-    if (liveCfg.summariesAuto !== false) runSummarizer(db, defaultRunner, liveCfg.language).catch(() => {});
     try { runLinks(db); } catch {}
     enrichPRs(db, defaultGhRunner).catch(() => {});
     enrichLinear(db, liveCfg.linearToken).catch(() => {});
-    syncDeadlines(db, { llmRunner: defaultRunner, linearToken: liveCfg.linearToken }).catch(() => {});
+    const llmRunnerForDeadlines = liveCfg.summariesAuto === true ? defaultRunner : undefined;
+    syncDeadlines(db, { llmRunner: llmRunnerForDeadlines, linearToken: liveCfg.linearToken }).catch(() => {});
   }, 300_000);
   setInterval(() => {
     const liveCfg = loadConfig();
-    if (liveCfg.dailyAuto !== false) generateDaily(db, defaultRunner, liveCfg.language, Date.now()).catch(() => {});
+    if (liveCfg.summariesAuto === true) runSummarizer(db, defaultRunner, liveCfg.language).catch(() => {});
   }, 3_600_000);
-  runSlack(db, slackDefaultRunner, defaultRunner, cfg, Date.now()).catch(() => {});
-  setInterval(
-    () => runSlack(db, slackDefaultRunner, defaultRunner, cfg, Date.now()).catch(() => {}),
-    900_000
-  );
+  setInterval(() => {
+    const liveCfg = loadConfig();
+    if (liveCfg.slackAuto === true) runSlack(db, slackDefaultRunner, defaultRunner, liveCfg, Date.now()).catch(() => {});
+  }, 1_800_000);
   const srv = createServer(db);
   console.log(`claude-live on http://localhost:${srv.port}`);
 }

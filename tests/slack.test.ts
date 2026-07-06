@@ -11,6 +11,7 @@ import {
   SLACK_ALLOWED_TOOLS,
   SLACK_UNAVAILABLE,
   defaultRunner,
+  buildSlackArgs,
   type SlackRunner,
   type RawMention,
   type RawSignal,
@@ -58,6 +59,17 @@ test("SLACK_ALLOWED_TOOLS contains exactly the 4 read-only Slack tools", () => {
 test("defaultRunner is a function accepting prompt and allowedTools", () => {
   expect(typeof defaultRunner).toBe("function");
   expect(defaultRunner.length).toBe(2);
+});
+
+test("buildSlackArgs pins model to haiku and limits max-turns to 12", () => {
+  const args = buildSlackArgs("claude");
+  expect(args).toContain("--model");
+  expect(args).toContain("claude-haiku-4-5-20251001");
+  const maxTurnsIdx = args.indexOf("--max-turns");
+  expect(maxTurnsIdx).toBeGreaterThan(-1);
+  expect(args[maxTurnsIdx + 1]).toBe("12");
+  expect(args[0]).toBe("claude");
+  expect(args[1]).toBe("-p");
 });
 
 // --- fetchMentions ---
@@ -564,8 +576,8 @@ test("runSlack works with empty config (no Slack channels)", async () => {
   await runSlack(db, slackRunner, llmRunner, {}, Date.now());
 
   // fetchMentions always runs; fetchSignals skips when no channels.
-  // Empty "[]" triggers one retry, so fetchMentions calls the runner twice.
-  expect(slackCallCount).toBe(2);
+  // Valid empty "[]" is success — no retry — so fetchMentions calls the runner exactly once.
+  expect(slackCallCount).toBe(1);
 });
 
 // --- retry logic ---

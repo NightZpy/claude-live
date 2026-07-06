@@ -11,6 +11,7 @@ export type Config = {
   notifyWaiting?: boolean;
   summariesAuto?: boolean;
   dailyAuto?: boolean;
+  slackAuto?: boolean;
   slackToken?: string;
   linearToken?: string;
   claudeBin?: string;
@@ -25,8 +26,9 @@ export const DEFAULT_CONFIG: Config = {
   notifyWaiting: true,
   slackChannelsAlerts: [],
   slackChannelsDeploys: [],
-  summariesAuto: true,
-  dailyAuto: true,
+  summariesAuto: false,
+  dailyAuto: false,
+  slackAuto: false,
   slackToken: "",
 };
 

@@ -4,7 +4,7 @@ import { loadConfig } from "./config";
 import { summarizeOne, defaultRunner, type LlmRunner, type SessionRow } from "./summarizer";
 import { extractInSessionDeadlinesForSession } from "./deadlines";
 
-const DEBOUNCE_MS = 5 * 60 * 1000;
+const DEBOUNCE_MS = 30 * 60 * 1000;
 
 export async function analyzeSession(
   db: Database,

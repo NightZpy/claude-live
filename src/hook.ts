@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { openDb, addEvent } from "./db";
+import { loadConfig } from "./config";
 
 export type HookPayload = {
   session_id: string;
@@ -52,10 +53,12 @@ export function findClaudePid(startPid: number): number | null {
 
 const trunc = (s: string | undefined, n: number) => (s ?? "").slice(0, n);
 
-const HOOK_DEBOUNCE_MS = 5 * 60 * 1000;
+const HOOK_DEBOUNCE_MS = 30 * 60 * 1000;
 
 function spawnAnalysis(db: Database, sessionId: string, now: number): void {
   try {
+    const cfg = loadConfig();
+    if (cfg.summariesAuto !== true) return;
     // Cheap guard: skip spawn if summarized recently (inner debounce in analyze-session.ts is second line of defense).
     const row = db.query("SELECT summary_at FROM sessions WHERE id=?").get(sessionId) as { summary_at: number | null } | null;
     if (row && typeof row.summary_at === "number" && now - row.summary_at < HOOK_DEBOUNCE_MS) return;

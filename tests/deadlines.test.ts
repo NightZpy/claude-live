@@ -119,3 +119,15 @@ test("extractPRDeadlines skips if same-ref deadline already exists", () => {
   expect(row.due_at).toBe(9999999);
   expect((db.query("SELECT COUNT(*) c FROM deadlines WHERE source='pr'").get() as any).c).toBe(1);
 });
+
+test("syncDeadlines with llmRunner undefined skips LLM extraction without throwing", async () => {
+  const db = openDb(":memory:");
+  db.run("INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved) VALUES ('C1','t1','u','due friday','100',1,0)");
+  db.run("INSERT INTO links (session_id, kind, ref, url, title) VALUES ('s1','pr','PR-opt-in','http://gh/1','Opt-in PR')");
+  await syncDeadlines(db, { llmRunner: undefined, linearToken: "" });
+  // No slack or in_session deadlines extracted (llmRunner absent)
+  expect((db.query("SELECT COUNT(*) c FROM deadlines WHERE source='slack'").get() as any).c).toBe(0);
+  expect((db.query("SELECT COUNT(*) c FROM deadlines WHERE source='in_session'").get() as any).c).toBe(0);
+  // PR deadlines still extracted (no LLM needed)
+  expect((db.query("SELECT COUNT(*) c FROM deadlines WHERE source='pr'").get() as any).c).toBeGreaterThan(0);
+});

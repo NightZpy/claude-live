@@ -177,13 +177,15 @@ export function extractPRDeadlines(db: Database, now: number): void {
 
 export async function syncDeadlines(
   db: Database,
-  opts: { llmRunner: LlmRunner; linearToken?: string },
+  opts: { llmRunner?: LlmRunner; linearToken?: string },
 ): Promise<void> {
   if (opts.linearToken) {
     try { await syncLinearDeadlines(db, opts.linearToken); } catch {}
   }
-  try { await extractSlackDeadlines(db, opts.llmRunner, Date.now()); } catch {}
-  try { await extractInSessionDeadlines(db, opts.llmRunner, Date.now()); } catch {}
+  if (opts.llmRunner) {
+    try { await extractSlackDeadlines(db, opts.llmRunner, Date.now()); } catch {}
+    try { await extractInSessionDeadlines(db, opts.llmRunner, Date.now()); } catch {}
+  }
   try { extractPRDeadlines(db, Date.now()); } catch {}
 }
 

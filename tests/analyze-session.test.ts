@@ -60,12 +60,12 @@ test("analyzeSession runs summarizeOne when summary_at is null", async () => {
   }
 });
 
-test("analyzeSession runs summarizeOne when summary_at is older than 5 min", async () => {
+test("analyzeSession runs summarizeOne when summary_at is older than 30 min", async () => {
   makeFakeTranscript();
   try {
     const db = openDb(":memory:");
     const now = Date.now();
-    const old = now - 6 * 60 * 1000;
+    const old = now - 31 * 60 * 1000;
     insertSession(db, "sess-2", old, FAKE_TRANSCRIPT);
     let calls = 0;
     const fakeRunner: LlmRunner = async () => { calls++; return CANNED_JSON; };
