@@ -34,6 +34,8 @@ export const DEFAULT_CONFIG: Config = {
   slackAuto: false,
   slackToken: "",
   mentionName: "",
+  llmPaused: false,
+  llmDailyCap: 100,
 };
 
 export function homeDir(): string {

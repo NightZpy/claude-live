@@ -265,6 +265,8 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           instances: c.instances,
           detectedInstances: detectInstances(homedir()),
           mentionName: c.mentionName ?? "",
+          llmPaused: c.llmPaused ?? false,
+          llmDailyCap: c.llmDailyCap ?? 100,
         });
       }
       if (url.pathname === "/api/config" && req.method === "POST") {
@@ -340,6 +342,16 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         if ("mentionName" in patch && typeof patch.mentionName === "string") {
           current.mentionName = patch.mentionName;
         }
+        if ("llmPaused" in patch && typeof patch.llmPaused === "boolean") {
+          current.llmPaused = patch.llmPaused;
+        }
+        if ("llmDailyCap" in patch) {
+          const cap = patch.llmDailyCap;
+          if (typeof cap !== "number" || !Number.isInteger(cap) || cap < 1 || cap > 10000) {
+            return new Response("invalid llmDailyCap: must be integer 1..10000", { status: 400 });
+          }
+          current.llmDailyCap = cap;
+        }
 
         saveConfig(current);
 
@@ -364,6 +376,8 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           instances: c.instances,
           detectedInstances: detectInstances(homedir()),
           mentionName: c.mentionName ?? "",
+          llmPaused: c.llmPaused ?? false,
+          llmDailyCap: c.llmDailyCap ?? 100,
         });
       }
       if (url.pathname === "/api/deadlines" && req.method === "GET") {

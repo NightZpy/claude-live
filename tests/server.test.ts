@@ -845,4 +845,121 @@ describe("/api/config", () => {
     expect(body.language).toBe("pt");
     srv.stop();
   });
+
+  test("GET /api/config includes llmPaused (boolean) and llmDailyCap (number)", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/config`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(typeof body.llmPaused).toBe("boolean");
+    expect(typeof body.llmDailyCap).toBe("number");
+    expect(body.llmPaused).toBe(false);
+    expect(body.llmDailyCap).toBe(100);
+    srv.stop();
+  });
+
+  test("POST /api/config with valid llmDailyCap: 50 returns 200", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const postRes = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: 50 }),
+    });
+    expect(postRes.status).toBe(200);
+    const body = await postRes.json() as any;
+    expect(body.llmDailyCap).toBe(50);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmDailyCap: 0 returns 400", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: 0 }),
+    });
+    expect(res.status).toBe(400);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmDailyCap: -1 returns 400", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: -1 }),
+    });
+    expect(res.status).toBe(400);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmDailyCap: 10001 returns 400", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: 10001 }),
+    });
+    expect(res.status).toBe(400);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmDailyCap: 1.5 (float) returns 400", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: 1.5 }),
+    });
+    expect(res.status).toBe(400);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmPaused: true returns 200", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const postRes = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmPaused: true }),
+    });
+    expect(postRes.status).toBe(200);
+    const body = await postRes.json() as any;
+    expect(body.llmPaused).toBe(true);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmDailyCap: 10000 (boundary) returns 200", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const postRes = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: 10000 }),
+    });
+    expect(postRes.status).toBe(200);
+    const body = await postRes.json() as any;
+    expect(body.llmDailyCap).toBe(10000);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmDailyCap: 1 (boundary) returns 200", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const postRes = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: 1 }),
+    });
+    expect(postRes.status).toBe(200);
+    const body = await postRes.json() as any;
+    expect(body.llmDailyCap).toBe(1);
+    srv.stop();
+  });
 });
