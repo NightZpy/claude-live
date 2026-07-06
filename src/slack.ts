@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { LlmRunner } from "./summarizer";
-import { loadConfig } from "./config";
+import { loadConfig, type Config } from "./config";
+import { llmAllowed, runGated } from "./llm-gate";
 
 export type SlackRunner = (prompt: string, allowedTools: string[]) => Promise<string>;
 
@@ -34,6 +35,10 @@ export const SLACK_ALLOWED_TOOLS = [
   "mcp__claude_ai_Slack__slack_read_channel",
 ];
 
+export function buildSlackArgs(bin: string): string[] {
+  return [bin, "-p", "--model", "claude-haiku-4-5-20251001", "--max-turns", "12"];
+}
+
 export const defaultRunner: SlackRunner = async (
   prompt: string,
   allowedTools: string[]
@@ -41,11 +46,7 @@ export const defaultRunner: SlackRunner = async (
   const cfg = loadConfig();
   const bin = cfg.claudeBin ?? "claude";
   const proc = Bun.spawn(
-    [
-      bin, "-p",
-      "--max-turns", "20",
-      "--allowedTools", allowedTools.join(","),
-    ],
+    [...buildSlackArgs(bin), "--allowedTools", allowedTools.join(",")],
     {
       stdin: Buffer.from(prompt),
       stdout: "pipe",
@@ -90,8 +91,7 @@ async function runWithRetry(
   if (raw.includes(SLACK_UNAVAILABLE)) return raw;
 
   const arr = parseJsonArray(raw);
-  const needsRetry =
-    raw.includes("Reached max turns") || arr === null || arr.length === 0;
+  const needsRetry = raw.includes("Reached max turns") || arr === null;
 
   if (!needsRetry) return raw;
 
@@ -111,11 +111,13 @@ async function runWithRetry(
 
 export async function fetchMentions(
   runner: SlackRunner,
-  sinceTs: number
+  sinceTs: number,
+  mentionName: string = ""
 ): Promise<RawMention[]> {
+  if (!mentionName) return [];
   const sinceDate = new Date(sinceTs).toISOString();
   const prompt =
-    `Search Slack for messages mentioning "Lenyn" or "@lenyn" since ${sinceDate}. ` +
+    `Search Slack for messages mentioning "${mentionName}" or "@${mentionName.toLowerCase()}" since ${sinceDate}. ` +
     `Use a SINGLE slack_search_public_and_private call — do NOT open threads, do NOT look up user IDs, do NOT call any other tool. ` +
     `Return STRICT JSON ONLY — a JSON array, no markdown, no explanation. ` +
     `Each item must have: channel (string — name or ID from the search result), author (string), text (string), ts (string). ` +
@@ -195,11 +197,31 @@ export function upsertMention(db: Database, raw: RawMention, now: number): void 
   const participantsJson = JSON.stringify(raw.participants ?? []);
 
   type ExRow = { id: number; ts: string | null };
-  const existing = db
-    .query("SELECT id, ts FROM mentions WHERE channel_id=? AND ts=?")
-    .get(channel, raw.ts) as ExRow | null;
 
-  if (!existing) {
+  // Exact same message already stored — idempotent
+  const sameMsg = db
+    .query("SELECT id FROM mentions WHERE channel_id=? AND ts=?")
+    .get(channel, raw.ts) as ExRow | null;
+  if (sameMsg) return;
+
+  // Same thread/author but newer ts — update text and reset deadline_checked_at
+  const sameThread = db
+    .query("SELECT id, ts FROM mentions WHERE channel_id=? AND thread_ts=? AND author=?")
+    .get(channel, threadTs, raw.author) as ExRow | null;
+  if (sameThread) {
+    const rawTs = parseFloat(raw.ts);
+    const sameTs = parseFloat(sameThread.ts ?? "");
+    if (!isNaN(rawTs) && !isNaN(sameTs) && rawTs > sameTs) {
+      db.run(
+        `UPDATE mentions SET text=?, ts=?, last_at=?, deadline_checked_at=NULL WHERE id=?`,
+        [raw.text, raw.ts, now, sameThread.id]
+      );
+    }
+    return;
+  }
+
+  // Brand-new mention
+  if (!sameThread) {
     db.run(
       `INSERT OR IGNORE INTO mentions
          (channel_id, channel_name, thread_ts, author, author_id, participants, text, ts,
@@ -245,7 +267,7 @@ export function markResolvedHeuristic(db: Database, now: number): void {
      WHERE resolved = 0
        AND resolved_manual IS NULL
        AND (
-         LOWER(COALESCE(author, '')) LIKE '%lenyn%'
+         LOWER(COALESCE(author, '')) LIKE '%sam%'
          OR last_at < ?
        )`,
     [cutoff24h]
@@ -307,14 +329,16 @@ export async function matchToSessions(
   db: Database,
   llmRunner: LlmRunner,
   language: string = "es",
-  now: number = Date.now()
+  now: number = Date.now(),
+  cfg?: Config,
 ): Promise<void> {
+  const retryThreshold = now - 86_400_000;
   const unlinkedMentions = db
-    .query("SELECT id, text FROM mentions WHERE session_id IS NULL AND resolved = 0")
-    .all() as MentionRow[];
+    .query("SELECT id, text FROM mentions WHERE session_id IS NULL AND resolved = 0 AND (match_attempted_at IS NULL OR match_attempted_at < ?)")
+    .all(retryThreshold) as MentionRow[];
   const unlinkedSignals = db
-    .query("SELECT id, text, channel FROM signals WHERE session_id IS NULL")
-    .all() as SignalRow[];
+    .query("SELECT id, text, channel FROM signals WHERE session_id IS NULL AND (match_attempted_at IS NULL OR match_attempted_at < ?)")
+    .all(retryThreshold) as SignalRow[];
 
   if (unlinkedMentions.length === 0 && unlinkedSignals.length === 0) return;
 
@@ -346,7 +370,7 @@ export async function matchToSessions(
       else if (score > secondScore) { secondScore = score; }
     }
     if (topScore >= 2 && topScore > secondScore) {
-      db.run(`UPDATE ${table} SET session_id = ? WHERE id = ?`, [topId, id]);
+      db.run(`UPDATE ${table} SET session_id = ?, match_attempted_at = ? WHERE id = ?`, [topId, now, id]);
     } else {
       ambiguous.push({ table, id, text: text ?? "" });
     }
@@ -381,28 +405,41 @@ export async function matchToSessions(
 
   let raw: string;
   try {
-    raw = await llmRunner(prompt);
-  } catch {
+    raw = cfg
+      ? await runGated(db, cfg, 'match', () => llmRunner(prompt))
+      : await llmRunner(prompt);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) throw err;
+    // Still stamp all ambiguous items so they aren't retried immediately
+    for (const { table, id } of ambiguous) {
+      db.run(`UPDATE ${table} SET match_attempted_at = ? WHERE id = ?`, [now, id]);
+    }
     return;
   }
 
   const arrMatch = raw.match(/\[[\s\S]*\]/);
-  if (!arrMatch) return;
+  // Stamp all ambiguous items regardless of parse outcome
   try {
-    const results = JSON.parse(arrMatch[0]);
-    if (!Array.isArray(results)) return;
-    for (const item of results) {
-      if (!item || typeof item !== "object") continue;
-      const idx = (item as Record<string, unknown>).idx;
-      const sessionId = (item as Record<string, unknown>).session_id;
-      if (typeof idx !== "number" || idx < 0 || idx >= ambiguous.length) continue;
-      if (typeof sessionId !== "string" || !sessionId) continue;
-      if (!sessions.find(s => s.id === sessionId)) continue;
-      const { table, id } = ambiguous[idx];
-      db.run(`UPDATE ${table} SET session_id = ? WHERE id = ?`, [sessionId, id]);
+    if (arrMatch) {
+      const results = JSON.parse(arrMatch[0]);
+      if (Array.isArray(results)) {
+        for (const item of results) {
+          if (!item || typeof item !== "object") continue;
+          const idx = (item as Record<string, unknown>).idx;
+          const sessionId = (item as Record<string, unknown>).session_id;
+          if (typeof idx !== "number" || idx < 0 || idx >= ambiguous.length) continue;
+          if (typeof sessionId !== "string" || !sessionId) continue;
+          if (!sessions.find(s => s.id === sessionId)) continue;
+          const { table, id } = ambiguous[idx];
+          db.run(`UPDATE ${table} SET session_id = ? WHERE id = ?`, [sessionId, id]);
+        }
+      }
     }
   } catch {
-    // ignore
+    // ignore parse errors
+  }
+  for (const { table, id } of ambiguous) {
+    db.run(`UPDATE ${table} SET match_attempted_at = ? WHERE id = ?`, [now, id]);
   }
 }
 
@@ -414,6 +451,7 @@ export type SlackConfig = {
   slackChannelsAlerts?: string[];
   slackChannelsDeploys?: string[];
   language?: string;
+  mentionName?: string;
 };
 
 export async function runSlack(
@@ -421,19 +459,26 @@ export async function runSlack(
   slackRunner: SlackRunner,
   llmRunner: LlmRunner,
   config: SlackConfig,
-  now: number
+  now: number,
+  cfg?: Config,
 ): Promise<void> {
+  // Gate the entire function: signals/mentions fetching uses LLM for matching, so blocking here is intentional.
+  if (cfg) {
+    const { allowed, reason } = llmAllowed(db, cfg, now);
+    if (!allowed) throw new Error('LLM_BLOCKED:' + reason);
+  }
+
   const alertChannels = config.slackChannelsAlerts ?? [];
   const deployChannels = config.slackChannelsDeploys ?? [];
   const language = config.language ?? "es";
 
   const sinceTs = now - 86_400_000;
-  const mentions = await fetchMentions(slackRunner, sinceTs);
+  const mentions = await fetchMentions(slackRunner, sinceTs, config.mentionName ?? "");
   for (const m of mentions) upsertMention(db, m, now);
 
   const signals = await fetchSignals(slackRunner, alertChannels, deployChannels);
   for (const s of signals) upsertSignal(db, s, now);
 
   markResolvedHeuristic(db, now);
-  await matchToSessions(db, llmRunner, language, now);
+  await matchToSessions(db, llmRunner, language, now, cfg);
 }

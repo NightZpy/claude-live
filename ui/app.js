@@ -74,11 +74,13 @@ const I18N = {
     settings_notify: "Notificar cuando Claude espera tu input",
     settings_summaries_auto: "Resúmenes automáticos",
     settings_daily_auto: "Daily automático",
+    settings_slack_auto: "Slack automático",
     settings_alerts: "Canales de alertas (separados por coma)",
     settings_deploys: "Canales de deploys (separados por coma)",
     settings_instances: "Instancias activas",
     settings_slack_token: "Slack token",
     settings_linear_token: "Linear token",
+    settings_mention_name: "Nombre a buscar en Slack",
     summary_generate: "generar resumen",
     settings_slack_token_set: "configurado ····",
     settings_save: "Guardar",
@@ -94,6 +96,17 @@ const I18N = {
     day_yesterday_desc: "lo que avancé",
     day_today_desc: "lo que sigue",
     day_blockers_desc: "lo que me traba",
+    usage_section: "Uso",
+    usage_today: "hoy",
+    usage_week: "semana",
+    usage_last: "última llamada",
+    usage_remaining: "restantes",
+    usage_paused: "LLM en pausa",
+    usage_stop: "Detener LLM",
+    usage_resume: "Reanudar",
+    refresh_all: "Actualizar todo",
+    refresh_running: "actualizando…",
+    settings_llm_cap: "Tope diario de llamadas LLM",
   },
   en: {
     sessions: "Sessions",
@@ -170,11 +183,13 @@ const I18N = {
     settings_notify: "Notify when Claude is waiting for input",
     settings_summaries_auto: "Auto summaries",
     settings_daily_auto: "Auto daily",
+    settings_slack_auto: "Auto Slack",
     settings_alerts: "Alert channels (comma-separated)",
     settings_deploys: "Deploy channels (comma-separated)",
     settings_instances: "Active instances",
     settings_slack_token: "Slack token",
     settings_linear_token: "Linear token",
+    settings_mention_name: "Slack mention name",
     summary_generate: "generate summary",
     settings_slack_token_set: "set ····",
     settings_save: "Save",
@@ -190,6 +205,17 @@ const I18N = {
     day_yesterday_desc: "what I did",
     day_today_desc: "what's next",
     day_blockers_desc: "what's blocking",
+    usage_section: "Usage",
+    usage_today: "today",
+    usage_week: "week",
+    usage_last: "last call",
+    usage_remaining: "remaining",
+    usage_paused: "LLM paused",
+    usage_stop: "Stop LLM",
+    usage_resume: "Resume",
+    refresh_all: "Refresh all",
+    refresh_running: "refreshing…",
+    settings_llm_cap: "Daily LLM call cap",
   },
   pt: {
     sessions: "Sessões",
@@ -266,11 +292,13 @@ const I18N = {
     settings_notify: "Notificar quando Claude aguarda input",
     settings_summaries_auto: "Resumos automáticos",
     settings_daily_auto: "Daily automático",
+    settings_slack_auto: "Slack automático",
     settings_alerts: "Canais de alertas (separados por vírgula)",
     settings_deploys: "Canais de deploys (separados por vírgula)",
     settings_instances: "Instâncias ativas",
     settings_slack_token: "Slack token",
     settings_linear_token: "Linear token",
+    settings_mention_name: "Nome a buscar no Slack",
     summary_generate: "gerar resumo",
     settings_slack_token_set: "configurado ····",
     settings_save: "Salvar",
@@ -286,6 +314,17 @@ const I18N = {
     day_yesterday_desc: "o que avancei",
     day_today_desc: "o que segue",
     day_blockers_desc: "o que trava",
+    usage_section: "Uso",
+    usage_today: "hoje",
+    usage_week: "semana",
+    usage_last: "última chamada",
+    usage_remaining: "restantes",
+    usage_paused: "LLM pausado",
+    usage_stop: "Parar LLM",
+    usage_resume: "Retomar",
+    refresh_all: "Atualizar tudo",
+    refresh_running: "atualizando…",
+    settings_llm_cap: "Limite diário de chamadas LLM",
   },
 };
 
@@ -1617,6 +1656,7 @@ function openSettings() {
         chk('s-notify', 'settings_notify', cfg.notifyWaiting) +
         chk('s-summaries', 'settings_summaries_auto', cfg.summariesAuto) +
         chk('s-daily', 'settings_daily_auto', cfg.dailyAuto) +
+        chk('s-slack-auto', 'settings_slack_auto', cfg.slackAuto) +
         '<div class="sfield">' +
           '<label>' + esc(t.settings_alerts || 'Alert channels') + '</label>' +
           '<input type="text" id="s-alerts" value="' + esc((cfg.slackChannelsAlerts || []).join(', ')) + '">' +
@@ -1639,6 +1679,14 @@ function openSettings() {
             '<input type="password" id="s-lintoken" placeholder="' + esc(linPlaceholder) + '" value="">' +
             '<button class="sbtn-clear" id="s-lintoken-clear">' + esc(t.settings_clear || 'Clear') + '</button>' +
           '</div>' +
+        '</div>' +
+        '<div class="sfield">' +
+          '<label>' + esc(t.settings_mention_name || 'Slack mention name') + '</label>' +
+          '<input type="text" id="s-mention-name" value="' + esc(cfg.mentionName || '') + '">' +
+        '</div>' +
+        '<div class="sfield">' +
+          '<label>' + esc(t.settings_llm_cap || 'Daily LLM call cap') + '</label>' +
+          '<input type="number" id="s-llm-cap" min="1" max="10000" value="' + esc(String(cfg.llmDailyCap != null ? cfg.llmDailyCap : 100)) + '">' +
         '</div>' +
         '<button class="sbtn-save" id="s-save">' + esc(t.settings_save || 'Save') + '</button>';
 
@@ -1676,6 +1724,9 @@ function saveSettings() {
   var dailyEl = document.getElementById('s-daily');
   if (dailyEl) payload.dailyAuto = dailyEl.checked;
 
+  var slackAutoEl = document.getElementById('s-slack-auto');
+  if (slackAutoEl) payload.slackAuto = slackAutoEl.checked;
+
   var alertsEl = document.getElementById('s-alerts');
   if (alertsEl) {
     payload.slackChannelsAlerts = alertsEl.value.split(',').map(function(s) { return s.trim(); }).filter(Boolean);
@@ -1703,6 +1754,17 @@ function saveSettings() {
       payload.slackToken = tokVal;
     }
     // if tokVal is empty and not cleared, and token was set: omit → server keeps token
+  }
+
+  var mentionNameEl = document.getElementById('s-mention-name');
+  if (mentionNameEl) payload.mentionName = mentionNameEl.value;
+
+  var llmCapEl = document.getElementById('s-llm-cap');
+  if (llmCapEl) {
+    var capVal = parseInt(llmCapEl.value, 10);
+    if (!isNaN(capVal) && capVal >= 1 && capVal <= 10000) {
+      payload.llmDailyCap = capVal;
+    }
   }
 
   var linEl = document.getElementById('s-lintoken');
@@ -1752,6 +1814,155 @@ function showToast(msg) {
   toast.textContent = msg;
   toast.classList.add('show');
   setTimeout(function() { toast.classList.remove('show'); }, 2000);
+}
+
+// ── Usage section ─────────────────────────────────────────────────────────
+
+var _usageData = null; // cached last fetch
+
+function renderUsage(usage) {
+  _usageData = usage;
+  var card = document.getElementById('usage-card');
+  if (!card) return;
+
+  // Paused banner
+  var banner = document.getElementById('paused-banner');
+  if (banner) {
+    if (usage.paused) {
+      banner.textContent = t.usage_paused || 'LLM en pausa';
+      banner.removeAttribute('hidden');
+    } else {
+      banner.setAttribute('hidden', '');
+    }
+  }
+
+  // Summary label (show paused badge if paused)
+  var summaryLabel = esc(t.usage_section || 'Uso');
+  if (usage.paused) {
+    summaryLabel += ' <span class="badge-sys usage-paused-badge">' + esc(t.usage_paused || 'LLM en pausa') + '</span>';
+  }
+
+  // Build byKind rows
+  var byKind = usage.today && usage.today.byKind ? usage.today.byKind : {};
+  var kindRows = Object.keys(byKind).map(function(k) {
+    return '<div class="frow">' +
+      '<span class="dim">' + esc(k) + '</span>' +
+      '<span>' + esc(String(byKind[k])) + '</span>' +
+    '</div>';
+  }).join('');
+  if (!kindRows) {
+    kindRows = '<div class="dim">—</div>';
+  }
+
+  var todayTotal = (usage.today && usage.today.total != null) ? usage.today.total : 0;
+  var weekTotal = (usage.week && usage.week.total != null) ? usage.week.total : 0;
+  var cap = usage.cap != null ? usage.cap : 100;
+  var remaining = usage.remaining != null ? usage.remaining : cap;
+
+  var lastCallHtml = '<span class="dim">—</span>';
+  if (usage.lastCall) {
+    var lc = usage.lastCall;
+    var lcAge = lc.ts ? rel(lc.ts) : '';
+    lastCallHtml = esc(lc.kind || '') + (lcAge ? ' · ' + esc(lcAge) : '') + (lc.ok === false ? ' <span class="red">✗</span>' : '');
+  }
+
+  var stopResumeBtn = usage.paused
+    ? '<button class="sbtn-clear usage-action-btn" id="usage-resume-btn">' + esc(t.usage_resume || 'Reanudar') + '</button>'
+    : '<button class="sbtn-clear usage-action-btn usage-stop-btn" id="usage-stop-btn">' + esc(t.usage_stop || 'Detener LLM') + '</button>';
+
+  var bodyHtml =
+    '<div class="frow"><span class="dim">' + esc(t.usage_today || 'hoy') + '</span><span>' + esc(String(todayTotal)) + ' / ' + esc(String(cap)) + ' · ' + esc(String(remaining)) + ' ' + esc(t.usage_remaining || 'restantes') + '</span></div>' +
+    '<div class="frow"><span class="dim">' + esc(t.usage_week || 'semana') + '</span><span>' + esc(String(weekTotal)) + '</span></div>' +
+    '<div class="frow"><span class="dim">' + esc(t.usage_last || 'última llamada') + '</span><span>' + lastCallHtml + '</span></div>' +
+    kindRows +
+    '<div style="margin-top:6px">' + stopResumeBtn + '</div>';
+
+  card.innerHTML =
+    '<details class="dsec" id="usage-details">' +
+      '<summary>' +
+        '<span class="arr">▶</span>' +
+        '<span class="lbl">' + summaryLabel + '</span>' +
+      '</summary>' +
+      '<div class="body">' + bodyHtml + '</div>' +
+    '</details>';
+
+  // Lazy poll when section opens
+  var det = card.querySelector('#usage-details');
+  if (det) {
+    det.addEventListener('toggle', function() {
+      if (det.open) pollUsage();
+    });
+  }
+
+  // STOP button
+  var stopBtn = card.querySelector('#usage-stop-btn');
+  if (stopBtn) {
+    stopBtn.addEventListener('click', function() {
+      stopBtn.disabled = true;
+      fetch('/api/llm/pause', { method: 'POST' })
+        .then(function(res) { return res.ok ? res.json() : null; })
+        .then(function(data) { if (data) renderUsage(data); })
+        .catch(function() { stopBtn.disabled = false; });
+    });
+  }
+
+  // RESUME button
+  var resumeBtn = card.querySelector('#usage-resume-btn');
+  if (resumeBtn) {
+    resumeBtn.addEventListener('click', function() {
+      resumeBtn.disabled = true;
+      fetch('/api/llm/resume', { method: 'POST' })
+        .then(function(res) { return res.ok ? res.json() : null; })
+        .then(function(data) { if (data) renderUsage(data); })
+        .catch(function() { resumeBtn.disabled = false; });
+    });
+  }
+}
+
+function pollUsage() {
+  fetch('/api/usage')
+    .then(function(res) { return res.ok ? res.json() : null; })
+    .then(function(data) { if (data) renderUsage(data); })
+    .catch(function() {});
+}
+
+// ── Refresh-all button ────────────────────────────────────────────────────
+
+function initRefreshBtn() {
+  var btn = document.getElementById('refresh-btn');
+  if (!btn) return;
+  btn.addEventListener('click', function() {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    var origTitle = btn.title;
+    btn.title = t.refresh_running || 'refreshing…';
+    fetch('/api/refresh', { method: 'POST' })
+      .then(function(res) { return res.ok ? res.json() : null; })
+      .then(function(data) {
+        btn.disabled = false;
+        btn.title = origTitle;
+        if (!data) { showToast('refresh error'); return; }
+        if (data.blocked) {
+          showToast(esc(data.blocked));
+        } else {
+          var parts = [];
+          if (data.summaries) parts.push(esc(String(data.summaries)) + ' resúmenes');
+          if (data.slack_ok) parts.push('slack ✓');
+          if (data.deadlines_checked) parts.push(esc(String(data.deadlines_checked)) + ' deadlines');
+          if (data.llm_calls_used != null) parts.push(esc(String(data.llm_calls_used)) + ' llamadas');
+          showToast(parts.length ? parts.join(' · ') : 'ok');
+        }
+        // Refresh usage section after action
+        pollUsage();
+        // Also refresh sessions
+        poll();
+      })
+      .catch(function() {
+        btn.disabled = false;
+        btn.title = origTitle;
+        showToast('refresh error');
+      });
+  });
 }
 
 function closeDetail() {
@@ -1862,7 +2073,9 @@ document.addEventListener("DOMContentLoaded", function () {
       closeDetail();
     }
   });
+  initRefreshBtn();
   poll();
+  pollUsage();
   setInterval(poll, 5000);
 
   // Hot reload via SSE (dev mode)

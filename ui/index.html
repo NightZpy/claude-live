@@ -11,10 +11,12 @@
     <div class="topbar">
       <div class="topbar-row">
         <input id="search" type="search" autocomplete="off">
+        <button id="refresh-btn" title="Actualizar todo">↻</button>
         <button id="settings-btn" title="Configuración">⚙</button>
       </div>
       <div id="filters"></div>
     </div>
+    <div id="paused-banner" hidden></div>
     <div class="cols">
       <div class="ledger">
         <div id="daily-card" hidden></div>
@@ -24,6 +26,7 @@
         <div id="sessions"></div>
         <div class="seclbl" id="lbl-archived"></div>
         <div id="archived"></div>
+        <div id="usage-card"></div>
       </div>
       <aside id="detail" hidden>
         <div class="d-head">

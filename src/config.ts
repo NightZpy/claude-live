@@ -11,11 +11,15 @@ export type Config = {
   notifyWaiting?: boolean;
   summariesAuto?: boolean;
   dailyAuto?: boolean;
+  slackAuto?: boolean;
   slackToken?: string;
   linearToken?: string;
   claudeBin?: string;
   claudeConfigDir?: string;
   claudePath?: string;
+  mentionName?: string;
+  llmPaused?: boolean;
+  llmDailyCap?: number;
 };
 
 export const DEFAULT_CONFIG: Config = {
@@ -25,9 +29,13 @@ export const DEFAULT_CONFIG: Config = {
   notifyWaiting: true,
   slackChannelsAlerts: [],
   slackChannelsDeploys: [],
-  summariesAuto: true,
-  dailyAuto: true,
+  summariesAuto: false,
+  dailyAuto: false,
+  slackAuto: false,
   slackToken: "",
+  mentionName: "",
+  llmPaused: false,
+  llmDailyCap: 100,
 };
 
 export function homeDir(): string {

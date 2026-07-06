@@ -47,7 +47,7 @@ test("extractSlackDeadlines stores a low-confidence slack deadline", async () =>
 
 test("extractSlackDeadlines skips mentions with no date-ish text (no LLM call)", async () => {
   const db = openDb(":memory:");
-  db.run("INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved) VALUES ('C1','t','Jordan','thanks lenyn','100',1,0)");
+  db.run("INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved) VALUES ('C1','t','Jordan','thanks sam','100',1,0)");
   let calls = 0;
   await extractSlackDeadlines(db, async () => { calls++; return "{}"; }, Date.now());
   expect(calls).toBe(0);
@@ -118,4 +118,121 @@ test("extractPRDeadlines skips if same-ref deadline already exists", () => {
   const row = db.query("SELECT * FROM deadlines WHERE source='pr'").get() as any;
   expect(row.due_at).toBe(9999999);
   expect((db.query("SELECT COUNT(*) c FROM deadlines WHERE source='pr'").get() as any).c).toBe(1);
+});
+
+test("syncDeadlines with llmRunner undefined skips LLM extraction without throwing", async () => {
+  const db = openDb(":memory:");
+  db.run("INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved) VALUES ('C1','t1','u','due friday','100',1,0)");
+  db.run("INSERT INTO links (session_id, kind, ref, url, title) VALUES ('s1','pr','PR-opt-in','http://gh/1','Opt-in PR')");
+  await syncDeadlines(db, { llmRunner: undefined, linearToken: "" });
+  // No slack or in_session deadlines extracted (llmRunner absent)
+  expect((db.query("SELECT COUNT(*) c FROM deadlines WHERE source='slack'").get() as any).c).toBe(0);
+  expect((db.query("SELECT COUNT(*) c FROM deadlines WHERE source='in_session'").get() as any).c).toBe(0);
+  // PR deadlines still extracted (no LLM needed)
+  expect((db.query("SELECT COUNT(*) c FROM deadlines WHERE source='pr'").get() as any).c).toBeGreaterThan(0);
+});
+
+// --- one-shot LLM marker tests ---
+
+test("extractSlackDeadlines processes mention once then never again (call-count stays 1 across two runs)", async () => {
+  const db = openDb(":memory:");
+  db.run("INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved) VALUES ('C1','t','Jordan','deliver by Friday?','100',1,0)");
+  let calls = 0;
+  const fake = async () => { calls++; return JSON.stringify({ due_at: 1783900800000, estimate_hours: null, title: "T" }); };
+
+  await extractSlackDeadlines(db, fake, Date.now());
+  expect(calls).toBe(1);
+
+  // Second run — mention already has deadline_checked_at set, should be skipped
+  await extractSlackDeadlines(db, fake, Date.now());
+  expect(calls).toBe(1); // still 1
+});
+
+test("extractSlackDeadlines: re-ask (upsertMention newer ts) resets deadline_checked_at and allows one more pass", async () => {
+  const { upsertMention } = await import("../src/slack");
+  const db = openDb(":memory:");
+  db.run("INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved) VALUES ('C2','100.000001','Jordan','deliver by Friday?','100.000001',1,0)");
+  let calls = 0;
+  const fake = async () => { calls++; return JSON.stringify({ due_at: 1783900800000, estimate_hours: null, title: "T" }); };
+
+  await extractSlackDeadlines(db, fake, Date.now());
+  expect(calls).toBe(1);
+
+  // Second run — skipped
+  await extractSlackDeadlines(db, fake, Date.now());
+  expect(calls).toBe(1);
+
+  // Simulate re-ask: same thread (thread_ts=100.000001) but new message ts
+  upsertMention(db, { channel: "C2", channel_id: "C2", thread_ts: "100.000001", author: "Jordan", text: "deliver by Friday please?", ts: "200.000001" }, Date.now());
+
+  // Third run — deadline_checked_at was reset, so it runs again
+  await extractSlackDeadlines(db, fake, Date.now());
+  expect(calls).toBe(2);
+
+  // Fourth run — checked again, skipped
+  await extractSlackDeadlines(db, fake, Date.now());
+  expect(calls).toBe(2);
+});
+
+test("extractInSessionDeadlines skips session when deadline_checked_at >= last_activity", async () => {
+  const db = openDb(":memory:");
+  const tmpPath = join(tmpdir(), `test-skip-${Date.now()}.jsonl`);
+  writeFileSync(tmpPath, JSON.stringify({ type: "user", message: { content: "can you deliver by Friday?" } }) + "\n");
+  const now = 1_000_000;
+  const lastActivity = 900_000;
+  db.run(
+    "INSERT INTO sessions (id, instance, status, kind, transcript_path, last_activity) VALUES ('sess-skip','test','running','session',?,?)",
+    [tmpPath, lastActivity]
+  );
+  // Set deadline_checked_at >= last_activity
+  db.run("UPDATE sessions SET deadline_checked_at=? WHERE id='sess-skip'", [lastActivity]);
+
+  let calls = 0;
+  await extractInSessionDeadlines(db, async () => { calls++; return "{}"; }, now);
+  try { unlinkSync(tmpPath); } catch {}
+
+  expect(calls).toBe(0); // skipped
+});
+
+test("extractInSessionDeadlines re-checks session after new activity", async () => {
+  const db = openDb(":memory:");
+  const tmpPath = join(tmpdir(), `test-recheck-${Date.now()}.jsonl`);
+  writeFileSync(tmpPath, JSON.stringify({ type: "user", message: { content: "can you deliver by Friday?" } }) + "\n");
+  const lastActivity = 1_000_000;
+  const checkedAt = 800_000; // checked BEFORE last_activity
+  db.run(
+    "INSERT INTO sessions (id, instance, status, kind, transcript_path, last_activity) VALUES ('sess-rc','test','running','session',?,?)",
+    [tmpPath, lastActivity]
+  );
+  db.run("UPDATE sessions SET deadline_checked_at=? WHERE id='sess-rc'", [checkedAt]);
+
+  let calls = 0;
+  const fake = async () => { calls++; return JSON.stringify({ due_at: 1783900800000, estimate_hours: null, title: "X" }); };
+  await extractInSessionDeadlines(db, fake, Date.now());
+  try { unlinkSync(tmpPath); } catch {}
+
+  expect(calls).toBe(1); // re-checked because new activity
+
+  // Now deadline_checked_at is updated, second run should skip
+  await extractInSessionDeadlines(db, fake, Date.now());
+  expect(calls).toBe(1);
+});
+
+test("mentions table has deadline_checked_at column after openDb", () => {
+  const db = openDb(":memory:");
+  const cols = (db.query("PRAGMA table_info(mentions)").all() as any[]).map(c => c.name);
+  expect(cols).toContain("deadline_checked_at");
+  expect(cols).toContain("match_attempted_at");
+});
+
+test("sessions table has deadline_checked_at column after openDb", () => {
+  const db = openDb(":memory:");
+  const cols = (db.query("PRAGMA table_info(sessions)").all() as any[]).map(c => c.name);
+  expect(cols).toContain("deadline_checked_at");
+});
+
+test("signals table has match_attempted_at column after openDb", () => {
+  const db = openDb(":memory:");
+  const cols = (db.query("PRAGMA table_info(signals)").all() as any[]).map(c => c.name);
+  expect(cols).toContain("match_attempted_at");
 });

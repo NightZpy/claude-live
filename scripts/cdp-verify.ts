@@ -235,7 +235,7 @@ try {
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ["C-CDP1", "general", "1751000001.000001", "Alice", "U001",
      JSON.stringify(["U001", "U002"]),
-     "Hey Lenyn can you review this PR?", "1751000001.000001",
+     "Hey Sam can you review this PR?", "1751000001.000001",
      1, 0, nowMs - 300_000, nowMs - 300_000, "cdp-s-wait"]
   );
   seedDb.run(
@@ -244,7 +244,7 @@ try {
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
     ["C-CDP2", "backend", "1751000002.000001", "Bob", "U002",
      JSON.stringify(["U002"]),
-     "Lenyn are you around? Any update?", "1751000002.000001",
+     "Sam are you around? Any update?", "1751000002.000001",
      2, 0, nowMs - 600_000, nowMs - 100_000]
   );
   // seed signal linked to cdp-s-wait
@@ -868,6 +868,45 @@ try {
   await evaluate(cdp, "localStorage.removeItem('cl-events-filter')");
 
   console.log("✓ I1-I7: events differentiation and filtering assertions passed");
+
+  // J: Usage section + refresh button ─────────────────────────────────
+
+  // J1: #usage-card renders a collapsed .dsec (usage section collapsed by default)
+  // Wait a moment for pollUsage() to complete
+  await sleep(800);
+  const j1exists = await evaluate(cdp, "!!document.querySelector('#usage-card .dsec')");
+  if (!j1exists) fail("J1: #usage-card .dsec not rendered after page load");
+  const j1open = await evaluate(cdp, "(document.querySelector('#usage-card #usage-details') || {}).open");
+  if (j1open) fail("J1: usage section #usage-details should be collapsed (open=false) by default");
+  console.log("✓ J1: usage section (.dsec) rendered and collapsed by default");
+
+  // J2: #refresh-btn exists in topbar
+  const j2 = await evaluate(cdp, "!!document.getElementById('refresh-btn')");
+  if (!j2) fail("J2: #refresh-btn not found in topbar");
+  console.log("✓ J2: refresh button exists in topbar");
+
+  // J3: clicking STOP button shows paused banner
+  // First open usage section to reveal the button
+  await evaluate(cdp, "(function() { var d = document.querySelector('#usage-card #usage-details'); if (d) d.open = true; })()");
+  await sleep(600); // wait for toggle → pollUsage
+  const j3btnExists = await evaluate(cdp, "!!document.getElementById('usage-stop-btn')");
+  if (!j3btnExists) fail("J3a: #usage-stop-btn not found in usage section");
+
+  // Click STOP
+  await evaluate(cdp, "document.getElementById('usage-stop-btn').click()");
+  await sleep(800);
+
+  const j3bannerHidden = await evaluate(cdp, "document.getElementById('paused-banner').hidden");
+  if (j3bannerHidden !== false) fail("J3b: paused banner still hidden after clicking STOP");
+  const j3bannerText = await evaluate(cdp, "document.getElementById('paused-banner').textContent || ''");
+  if (!j3bannerText.trim()) fail("J3c: paused banner is visible but has no text");
+  console.log(`✓ J3: STOP button shows paused banner: "${j3bannerText.trim()}"`);
+
+  // Resume LLM so server stays clean for other tests
+  await evaluate(cdp, `fetch('/api/llm/resume', { method: 'POST' })`);
+  await sleep(300);
+
+  console.log("✓ J1-J3: usage section and refresh button assertions passed");
 
   // 7. Screenshot ───────────────────────────────────────────────────────
   const ss = await cdp.send<any>("Page.captureScreenshot", { format: "png" });

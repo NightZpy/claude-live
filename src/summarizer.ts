@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { readDigest } from "./transcript";
-import { loadConfig } from "./config";
+import { loadConfig, type Config } from "./config";
+import { runGated } from "./llm-gate";
 
 export type LlmRunner = (prompt: string) => Promise<string>;
 
@@ -101,7 +102,8 @@ export async function summarizeOne(
   db: Database,
   session: SessionRow,
   runner: LlmRunner,
-  language: string = "es"
+  language: string = "es",
+  cfg?: Config,
 ): Promise<void> {
   const transcriptPath = session.transcript_path ?? "";
   const digest = transcriptPath ? readDigest(transcriptPath) : "";
@@ -114,8 +116,11 @@ export async function summarizeOne(
 
   let raw: string;
   try {
-    raw = await runner(prompt);
-  } catch {
+    raw = cfg
+      ? await runGated(db, cfg, 'summary', () => runner(prompt))
+      : await runner(prompt);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) throw err;
     db.run("UPDATE sessions SET summary_at=? WHERE id=?", [now, session.id]);
     return;
   }
@@ -177,12 +182,18 @@ export async function summarizeOne(
 export async function runSummarizer(
   db: Database,
   runner: LlmRunner = defaultRunner,
-  language: string = "es"
+  language: string = "es",
+  cfg?: Config,
 ): Promise<number> {
   const sessions = pickSessions(db);
   let count = 0;
   for (const session of sessions) {
-    await summarizeOne(db, session, runner, language);
+    try {
+      await summarizeOne(db, session, runner, language, cfg);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) break;
+      throw err;
+    }
     count++;
   }
   return count;

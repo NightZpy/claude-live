@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { readFileSync, mkdtempSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { openDb } from "../src/db";
@@ -123,4 +123,35 @@ test("CLI with CLAUDE_LIVE_IGNORE=1 exits 0 without touching DB", async () => {
   p.stdin.end();
   expect(await p.exited).toBe(0);
   expect(existsSync(join(tmp, "claude-live.db"))).toBe(false);
+});
+
+test("Stop with summariesAuto false does not spawn analysis subprocess", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "cl-hook-cfg-"));
+  writeFileSync(join(tmp, "config.json"), JSON.stringify({ summariesAuto: false }));
+  const prevHome = process.env.CLAUDE_LIVE_HOME;
+  process.env.CLAUDE_LIVE_HOME = tmp;
+
+  const db = openDb(":memory:");
+  db.run(
+    `INSERT INTO sessions (id, instance, status, started_at, last_activity)
+     VALUES ('fix-1', 'work', 'running', 0, 0)`,
+  );
+
+  let spawned = false;
+  const origSpawn = Bun.spawn;
+  (Bun as any).spawn = (...args: any[]) => {
+    spawned = true;
+    return origSpawn(...args);
+  };
+  try {
+    await handle(db, fx("stop"), process.pid);
+  } finally {
+    (Bun as any).spawn = origSpawn;
+    if (prevHome === undefined) delete process.env.CLAUDE_LIVE_HOME;
+    else process.env.CLAUDE_LIVE_HOME = prevHome;
+  }
+
+  const s = db.query("SELECT status FROM sessions WHERE id='fix-1'").get() as any;
+  expect(s.status).toBe("idle");
+  expect(spawned).toBe(false);
 });

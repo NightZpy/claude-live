@@ -386,7 +386,7 @@ test("/api/inbox returns mentions and signals arrays", async () => {
     `INSERT INTO mentions (channel_id, channel_name, thread_ts, author, author_id, participants, text, ts,
        ask_count, resolved, first_at, last_at)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-    ["C1", "general", "ts1", "Alice", "U1", "[]", "hey Lenyn", "ts1", 1, 0, now - 1000, now - 1000]
+    ["C1", "general", "ts1", "Alice", "U1", "[]", "hey Sam", "ts1", 1, 0, now - 1000, now - 1000]
   );
   db.run(
     "INSERT INTO signals (kind, channel, text, ts, created_at) VALUES (?,?,?,?,?)",
@@ -756,6 +756,56 @@ describe("/api/config", () => {
     srv.stop();
   });
 
+  // --- LLM gate 429 responses ---
+
+  test("POST /api/sessions/:id/summarize returns 429 when llmPaused=true", async () => {
+    // Write a transcript long enough to pass the 50-char digest check
+    const transcript = join(TMP_DIR, "paused-transcript.jsonl");
+    writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "x".repeat(100) } }) + "\n");
+    try {
+      saveConfig({ ...DEFAULT_CONFIG, llmPaused: true });
+      const db = openDb(":memory:");
+      const now = Date.now();
+      db.run(
+        "INSERT INTO sessions (id, instance, status, kind, started_at, last_activity, transcript_path) VALUES (?,?,?,?,?,?,?)",
+        ["pause-sess", "personal", "running", "session", now - 1000, now, transcript]
+      );
+      const srv = createServer(db, { port: 0 });
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/sessions/pause-sess/summarize`, { method: "POST" });
+      expect(res.status).toBe(429);
+      const body = await res.json() as any;
+      expect(body.error).toBe("llm_paused");
+      srv.stop();
+    } finally {
+      try { unlinkSync(transcript); } catch {}
+      saveConfig(DEFAULT_CONFIG);
+    }
+  });
+
+  test("GET /api/sessions/:id/resume-prompt returns 429 when llmPaused=true", async () => {
+    const transcript = join(TMP_DIR, "paused-resume-transcript.jsonl");
+    writeFileSync(transcript, JSON.stringify({ type: "user", message: { content: "x".repeat(100) } }) + "\n");
+    try {
+      saveConfig({ ...DEFAULT_CONFIG, llmPaused: true });
+      const db = openDb(":memory:");
+      const now = Date.now();
+      // No summary set — causes buildResumePromptRich to call summarizeOne
+      db.run(
+        "INSERT INTO sessions (id, instance, status, kind, started_at, last_activity, transcript_path) VALUES (?,?,?,?,?,?,?)",
+        ["pause-resume", "personal", "running", "session", now - 1000, now, transcript]
+      );
+      const srv = createServer(db, { port: 0 });
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/sessions/pause-resume/resume-prompt`);
+      expect(res.status).toBe(429);
+      const body = await res.json() as any;
+      expect(body.error).toBe("llm_paused");
+      srv.stop();
+    } finally {
+      try { unlinkSync(transcript); } catch {}
+      saveConfig(DEFAULT_CONFIG);
+    }
+  });
+
   test("two rapid POSTs to /api/deadlines produce distinct refs", async () => {
     const db = openDb(":memory:");
     const srv = createServer(db, { port: 0 });
@@ -794,5 +844,283 @@ describe("/api/config", () => {
     const body = await getRes.json() as any;
     expect(body.language).toBe("pt");
     srv.stop();
+  });
+
+  test("GET /api/config includes llmPaused (boolean) and llmDailyCap (number)", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/config`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(typeof body.llmPaused).toBe("boolean");
+    expect(typeof body.llmDailyCap).toBe("number");
+    expect(body.llmPaused).toBe(false);
+    expect(body.llmDailyCap).toBe(100);
+    srv.stop();
+  });
+
+  test("POST /api/config with valid llmDailyCap: 50 returns 200", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const postRes = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: 50 }),
+    });
+    expect(postRes.status).toBe(200);
+    const body = await postRes.json() as any;
+    expect(body.llmDailyCap).toBe(50);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmDailyCap: 0 returns 400", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: 0 }),
+    });
+    expect(res.status).toBe(400);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmDailyCap: -1 returns 400", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: -1 }),
+    });
+    expect(res.status).toBe(400);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmDailyCap: 10001 returns 400", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: 10001 }),
+    });
+    expect(res.status).toBe(400);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmDailyCap: 1.5 (float) returns 400", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: 1.5 }),
+    });
+    expect(res.status).toBe(400);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmPaused: true returns 200", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const postRes = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmPaused: true }),
+    });
+    expect(postRes.status).toBe(200);
+    const body = await postRes.json() as any;
+    expect(body.llmPaused).toBe(true);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmDailyCap: 10000 (boundary) returns 200", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const postRes = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: 10000 }),
+    });
+    expect(postRes.status).toBe(200);
+    const body = await postRes.json() as any;
+    expect(body.llmDailyCap).toBe(10000);
+    srv.stop();
+  });
+
+  test("POST /api/config with llmDailyCap: 1 (boundary) returns 200", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const postRes = await fetch(`http://127.0.0.1:${srv.port}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llmDailyCap: 1 }),
+    });
+    expect(postRes.status).toBe(200);
+    const body = await postRes.json() as any;
+    expect(body.llmDailyCap).toBe(1);
+    srv.stop();
+  });
+
+  // --- /api/usage ---
+
+  test("GET /api/usage basic shape: fresh db returns expected fields", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/usage`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.today.total).toBe(0);
+    expect(body.today.byKind).toEqual({});
+    expect(body.week.total).toBe(0);
+    expect(body.lastCall).toBeNull();
+    expect(body.cap).toBe(100);
+    expect(body.remaining).toBe(100);
+    expect(body.paused).toBe(false);
+    srv.stop();
+  });
+
+  test("GET /api/usage with rows: reflects inserted llm_calls", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const startOfToday = now - (now % 86400000);
+    db.run("INSERT INTO llm_calls (ts, kind, model, ok) VALUES (?, 'summary', 'claude-3-opus', 1)", [startOfToday + 1000]);
+    db.run("INSERT INTO llm_calls (ts, kind, model, ok) VALUES (?, 'summary', 'claude-3-opus', 1)", [startOfToday + 2000]);
+    db.run("INSERT INTO llm_calls (ts, kind, model, ok) VALUES (?, 'generate', 'claude-3-haiku', 0)", [startOfToday + 3000]);
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/usage`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.today.total).toBe(3);
+    expect(body.today.byKind.summary).toBe(2);
+    expect(body.today.byKind.generate).toBe(1);
+    expect(body.lastCall).not.toBeNull();
+    expect(body.lastCall.kind).toBe("generate");
+    expect(body.lastCall.model).toBe("claude-3-haiku");
+    expect(body.lastCall.ok).toBe(false);
+    srv.stop();
+  });
+
+  test("POST /api/llm/pause flips paused to true and returns usage", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/llm/pause`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.paused).toBe(true);
+    const getRes = await fetch(`http://127.0.0.1:${srv.port}/api/usage`);
+    const getBody = await getRes.json() as any;
+    expect(getBody.paused).toBe(true);
+    srv.stop();
+  });
+
+  test("POST /api/llm/resume flips paused to false and returns usage", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    // First pause
+    await fetch(`http://127.0.0.1:${srv.port}/api/llm/pause`, { method: "POST" });
+    // Then resume
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/llm/resume`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.paused).toBe(false);
+    const getRes = await fetch(`http://127.0.0.1:${srv.port}/api/usage`);
+    const getBody = await getRes.json() as any;
+    expect(getBody.paused).toBe(false);
+    srv.stop();
+  });
+
+  // --- POST /api/refresh ---
+
+  test("POST /api/refresh when paused: blocked='paused', all counts 0, no llm calls", async () => {
+    saveConfig({ ...DEFAULT_CONFIG, llmPaused: true });
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh`, { method: "POST" });
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect(body.blocked).toBe("paused");
+      expect(body.summaries).toBe(0);
+      expect(body.slack_ok).toBe(false);
+      expect(body.deadlines_checked).toBe(0);
+      expect(body.daily).toBe(false);
+      expect(body.llm_calls_used).toBe(0);
+      // No llm_calls inserted
+      const callCount = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as any).n;
+      expect(callCount).toBe(0);
+    } finally {
+      srv.stop();
+      saveConfig(DEFAULT_CONFIG);
+    }
+  });
+
+  test("POST /api/refresh normal: returns correct shape with blocked:null", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh`, { method: "POST" });
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect(body.blocked).toBeNull();
+      expect(typeof body.summaries).toBe("number");
+      expect(typeof body.slack_ok).toBe("boolean");
+      expect(typeof body.deadlines_checked).toBe("number");
+      expect(typeof body.daily).toBe("boolean");
+      expect(typeof body.llm_calls_used).toBe("number");
+      expect(body.llm_calls_used).toBeGreaterThanOrEqual(0);
+    } finally {
+      srv.stop();
+    }
+  });
+
+  test("POST /api/refresh?daily=1: response includes daily field", async () => {
+    const db = openDb(":memory:");
+    const fakeRunner = async () => '{"es":{"yesterday":"- y","today":"- t","blockers":""},"en":{"yesterday":"- ye","today":"- te","blockers":""}}';
+    const srv = createServer(db, { port: 0, refreshRunner: fakeRunner });
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh?daily=1`, { method: "POST" });
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect("daily" in body).toBe(true);
+      expect(typeof body.daily).toBe("boolean");
+    } finally {
+      srv.stop();
+    }
+  });
+
+  test("POST /api/refresh llm_calls_used is >= 0", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh`, { method: "POST" });
+      const body = await res.json() as any;
+      expect(body.llm_calls_used).toBeGreaterThanOrEqual(0);
+    } finally {
+      srv.stop();
+    }
+  });
+
+  test("GET /api/usage remaining calculation with custom cap and calls", async () => {
+    saveConfig({ ...DEFAULT_CONFIG, llmDailyCap: 5 });
+    try {
+      const db = openDb(":memory:");
+      const now = Date.now();
+      const startOfToday = now - (now % 86400000);
+      db.run("INSERT INTO llm_calls (ts, kind, model, ok) VALUES (?, 'summary', 'claude-3-opus', 1)", [startOfToday + 1000]);
+      db.run("INSERT INTO llm_calls (ts, kind, model, ok) VALUES (?, 'summary', 'claude-3-opus', 1)", [startOfToday + 2000]);
+      db.run("INSERT INTO llm_calls (ts, kind, model, ok) VALUES (?, 'generate', 'claude-3-haiku', 1)", [startOfToday + 3000]);
+      const srv = createServer(db, { port: 0 });
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/usage`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect(body.cap).toBe(5);
+      expect(body.today.total).toBe(3);
+      expect(body.remaining).toBe(2);
+      srv.stop();
+    } finally {
+      saveConfig(DEFAULT_CONFIG);
+    }
   });
 });

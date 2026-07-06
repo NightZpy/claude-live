@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { watch } from "node:fs";
 import { openDb } from "./db";
 import { sweep } from "./sweeper";
-import { loadConfig, saveConfig } from "./config";
+import { loadConfig, saveConfig, type Config } from "./config";
 import { detectInstances } from "./setup";
 import { homedir } from "node:os";
 import { runSummarizer, summarizeOne, defaultRunner, type LlmRunner } from "./summarizer";
@@ -15,6 +15,7 @@ import { notify, checkNotifications } from "./notify";
 import { runLinks, enrichPRs, defaultGhRunner } from "./links";
 import { enrichLinear } from "./linear";
 import { syncDeadlines } from "./deadlines";
+import { llmAllowed } from "./llm-gate";
 
 const UI_DIR = join(import.meta.dir, "../ui");
 const STATIC = new Set(["index.html", "app.js", "style.css"]);
@@ -63,7 +64,53 @@ const INBOX_SIGNALS_SQL = `
 
 const DEBOUNCE_MS = 60 * 60 * 1000;
 
-export function createServer(db: Database, opts: { port?: number; dailyRunner?: LlmRunner } = {}) {
+function buildUsagePayload(db: Database, cfg: Config, now: number): object {
+  const startOfToday = now - (now % 86400000);
+  const startOfWeek = startOfToday - 7 * 86400000;
+
+  type KindRow = { kind: string; cnt: number };
+  const todayRows = db.query(
+    "SELECT kind, COUNT(*) as cnt FROM llm_calls WHERE ts > ? GROUP BY kind"
+  ).all(startOfToday) as KindRow[];
+
+  const byKind: Record<string, number> = {};
+  let todayTotal = 0;
+  for (const row of todayRows) {
+    byKind[row.kind] = row.cnt;
+    todayTotal += row.cnt;
+  }
+
+  type CountRow = { total: number };
+  const weekRow = db.query(
+    "SELECT COUNT(*) as total FROM llm_calls WHERE ts > ?"
+  ).get(startOfWeek) as CountRow;
+
+  type LastRow = { ts: number; kind: string; model: string | null; ok: number };
+  const lastRow = db.query(
+    "SELECT ts, kind, model, ok FROM llm_calls ORDER BY ts DESC LIMIT 1"
+  ).get() as LastRow | null;
+
+  const cap = cfg.llmDailyCap ?? 100;
+  return {
+    today: { total: todayTotal, byKind },
+    week: { total: weekRow.total },
+    lastCall: lastRow ? { ts: lastRow.ts, kind: lastRow.kind, model: lastRow.model, ok: lastRow.ok === 1 } : null,
+    cap,
+    remaining: Math.max(0, cap - todayTotal),
+    paused: cfg.llmPaused ?? false,
+  };
+}
+
+function llmBlockedResponse(err: unknown): Response | null {
+  if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) {
+    const reason = err.message.slice('LLM_BLOCKED:'.length);
+    const error = reason === 'paused' ? 'llm_paused' : 'llm_cap';
+    return Response.json({ error }, { status: 429 });
+  }
+  return null;
+}
+
+export function createServer(db: Database, opts: { port?: number; dailyRunner?: LlmRunner; refreshRunner?: LlmRunner } = {}) {
   const cfg = loadConfig();
   const port = opts.port ?? Number(process.env.PORT ?? cfg.port);
 
@@ -137,7 +184,14 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           }
         }
         const runner = opts.dailyRunner ?? defaultRunner;
-        const result = await generateDaily(db, runner, cfg.language, Date.now());
+        let result: Awaited<ReturnType<typeof generateDaily>>;
+        try {
+          result = await generateDaily(db, runner, cfg.language, Date.now(), cfg);
+        } catch (err) {
+          const blocked = llmBlockedResponse(err);
+          if (blocked) return blocked;
+          return new Response("generation failed", { status: 500 });
+        }
         if (!result) return new Response("generation failed", { status: 500 });
         return Response.json(result);
       }
@@ -204,17 +258,25 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
       }
       const rm = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)\/resume-prompt$/);
       if (rm) {
-        const prompt = await buildResumePromptRich(db, rm[1], defaultRunner);
-        if (!prompt) return new Response("not found", { status: 404 });
-        return new Response(prompt, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+        try {
+          const prompt = await buildResumePromptRich(db, rm[1], defaultRunner, cfg);
+          if (!prompt) return new Response("not found", { status: 404 });
+          return new Response(prompt, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+        } catch (err) {
+          const blocked = llmBlockedResponse(err);
+          if (blocked) return blocked;
+          return new Response("not found", { status: 404 });
+        }
       }
       const sm = url.pathname.match(/^\/api\/sessions\/([A-Za-z0-9_-]+)\/summarize$/);
       if (sm && req.method === "POST") {
         const session = db.query("SELECT * FROM sessions WHERE id = ?").get(sm[1]) as any;
         if (!session) return new Response("not found", { status: 404 });
         try {
-          await summarizeOne(db, session, defaultRunner, loadConfig().language);
-        } catch {
+          await summarizeOne(db, session, defaultRunner, loadConfig().language, cfg);
+        } catch (err) {
+          const blocked = llmBlockedResponse(err);
+          if (blocked) return blocked;
           return Response.json({ error: "summarize_failed" }, { status: 502 });
         }
         return Response.json(db.query("SELECT * FROM sessions WHERE id = ?").get(sm[1]));
@@ -229,8 +291,9 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           language: c.language,
           port: c.port,
           notifyWaiting: c.notifyWaiting ?? true,
-          summariesAuto: c.summariesAuto ?? true,
-          dailyAuto: c.dailyAuto ?? true,
+          summariesAuto: c.summariesAuto === true,
+          dailyAuto: c.dailyAuto === true,
+          slackAuto: c.slackAuto === true,
           slackChannelsAlerts: c.slackChannelsAlerts ?? [],
           slackChannelsDeploys: c.slackChannelsDeploys ?? [],
           slackTokenSet: tokenSet,
@@ -239,6 +302,9 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           linearTokenLast4: linTokenLast4,
           instances: c.instances,
           detectedInstances: detectInstances(homedir()),
+          mentionName: c.mentionName ?? "",
+          llmPaused: c.llmPaused ?? false,
+          llmDailyCap: c.llmDailyCap ?? 100,
         });
       }
       if (url.pathname === "/api/config" && req.method === "POST") {
@@ -269,6 +335,9 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         }
         if ("dailyAuto" in patch && typeof patch.dailyAuto === "boolean") {
           current.dailyAuto = patch.dailyAuto;
+        }
+        if ("slackAuto" in patch && typeof patch.slackAuto === "boolean") {
+          current.slackAuto = patch.slackAuto;
         }
         if ("slackChannelsAlerts" in patch && Array.isArray(patch.slackChannelsAlerts) &&
             (patch.slackChannelsAlerts as unknown[]).every(x => typeof x === "string")) {
@@ -308,6 +377,19 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           }
           // masked placeholder → do not overwrite
         }
+        if ("mentionName" in patch && typeof patch.mentionName === "string") {
+          current.mentionName = patch.mentionName;
+        }
+        if ("llmPaused" in patch && typeof patch.llmPaused === "boolean") {
+          current.llmPaused = patch.llmPaused;
+        }
+        if ("llmDailyCap" in patch) {
+          const cap = patch.llmDailyCap;
+          if (typeof cap !== "number" || !Number.isInteger(cap) || cap < 1 || cap > 10000) {
+            return new Response("invalid llmDailyCap: must be integer 1..10000", { status: 400 });
+          }
+          current.llmDailyCap = cap;
+        }
 
         saveConfig(current);
 
@@ -320,8 +402,9 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           language: c.language,
           port: c.port,
           notifyWaiting: c.notifyWaiting ?? true,
-          summariesAuto: c.summariesAuto ?? true,
-          dailyAuto: c.dailyAuto ?? true,
+          summariesAuto: c.summariesAuto === true,
+          dailyAuto: c.dailyAuto === true,
+          slackAuto: c.slackAuto === true,
           slackChannelsAlerts: c.slackChannelsAlerts ?? [],
           slackChannelsDeploys: c.slackChannelsDeploys ?? [],
           slackTokenSet: tokenSet,
@@ -330,7 +413,26 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           linearTokenLast4: linTokenLast4,
           instances: c.instances,
           detectedInstances: detectInstances(homedir()),
+          mentionName: c.mentionName ?? "",
+          llmPaused: c.llmPaused ?? false,
+          llmDailyCap: c.llmDailyCap ?? 100,
         });
+      }
+      if (url.pathname === "/api/usage" && req.method === "GET") {
+        const freshCfg = loadConfig();
+        return Response.json(buildUsagePayload(db, freshCfg, Date.now()));
+      }
+      if (url.pathname === "/api/llm/pause" && req.method === "POST") {
+        const freshCfg = loadConfig();
+        freshCfg.llmPaused = true;
+        saveConfig(freshCfg);
+        return Response.json(buildUsagePayload(db, freshCfg, Date.now()));
+      }
+      if (url.pathname === "/api/llm/resume" && req.method === "POST") {
+        const freshCfg = loadConfig();
+        freshCfg.llmPaused = false;
+        saveConfig(freshCfg);
+        return Response.json(buildUsagePayload(db, freshCfg, Date.now()));
       }
       if (url.pathname === "/api/deadlines" && req.method === "GET") {
         const rows = db.query(
@@ -389,6 +491,91 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         db.run("UPDATE deadlines SET status = 'dismissed', updated_at = ? WHERE id = ?", [Date.now(), id]);
         return Response.json({ ok: true });
       }
+      if (url.pathname === "/api/refresh" && req.method === "POST") {
+        const freshCfg = loadConfig();
+        const now = Date.now();
+        const runner = opts.refreshRunner ?? defaultRunner;
+
+        const { allowed, reason } = llmAllowed(db, freshCfg, now);
+        if (!allowed) {
+          return Response.json({
+            summaries: 0,
+            slack_ok: false,
+            deadlines_checked: 0,
+            daily: false,
+            llm_calls_used: 0,
+            blocked: reason,
+          });
+        }
+
+        type CountRow = { n: number };
+        const before = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
+
+        let summaries = 0;
+        let slack_ok = false;
+        let deadlines_checked = 0;
+        let daily = false;
+
+        // 1. Summarizer
+        try {
+          summaries = await runSummarizer(db, runner, freshCfg.language, freshCfg);
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) {
+            const after = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
+            return Response.json({ summaries, slack_ok, deadlines_checked, daily, llm_calls_used: after - before, blocked: err.message.split(':')[1] });
+          }
+        }
+
+        // 2. Slack (only if mentionName configured)
+        if (freshCfg.mentionName) {
+          try {
+            await runSlack(db, slackDefaultRunner, runner, freshCfg, now, freshCfg);
+            slack_ok = true;
+          } catch (err) {
+            if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) {
+              const after = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
+              return Response.json({ summaries, slack_ok, deadlines_checked, daily, llm_calls_used: after - before, blocked: err.message.split(':')[1] });
+            }
+          }
+        }
+
+        // 3. Deadlines
+        try {
+          await syncDeadlines(db, { llmRunner: runner, linearToken: freshCfg.linearToken, cfg: freshCfg });
+          type KindCount = { n: number };
+          deadlines_checked = (db.query(
+            "SELECT COUNT(*) as n FROM llm_calls WHERE kind='deadline' AND ts > ?"
+          ).get(now) as KindCount).n;
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) {
+            const after = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
+            return Response.json({ summaries, slack_ok, deadlines_checked, daily, llm_calls_used: after - before, blocked: err.message.split(':')[1] });
+          }
+        }
+
+        // 4. Daily (only if ?daily=1)
+        if (url.searchParams.get("daily") === "1") {
+          try {
+            const result = await generateDaily(db, runner, freshCfg.language, now, freshCfg);
+            daily = result !== null;
+          } catch (err) {
+            if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) {
+              const after = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
+              return Response.json({ summaries, slack_ok, deadlines_checked, daily, llm_calls_used: after - before, blocked: err.message.split(':')[1] });
+            }
+          }
+        }
+
+        const after = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
+        return Response.json({
+          summaries,
+          slack_ok,
+          deadlines_checked,
+          daily,
+          llm_calls_used: after - before,
+          blocked: null,
+        });
+      }
       const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
       if (STATIC.has(name)) return new Response(Bun.file(join(UI_DIR, name)));
       return new Response("not found", { status: 404 });
@@ -405,28 +592,27 @@ if (import.meta.main) {
     const liveCfg = loadConfig();
     checkNotifications(db, liveCfg.notifyWaiting !== false ? notify : () => {});
   }, 60_000);
-  if (cfg.summariesAuto !== false) runSummarizer(db, defaultRunner, cfg.language).catch(() => {});
   runLinks(db);
   enrichPRs(db, defaultGhRunner).catch(() => {});
   enrichLinear(db, cfg.linearToken).catch(() => {});
-  syncDeadlines(db, { llmRunner: defaultRunner, linearToken: cfg.linearToken }).catch(() => {});
+  const llmRunnerForDeadlines = cfg.summariesAuto === true ? defaultRunner : undefined;
+  syncDeadlines(db, { llmRunner: llmRunnerForDeadlines, linearToken: cfg.linearToken, cfg }).catch(() => {});
   setInterval(() => {
     const liveCfg = loadConfig();
-    if (liveCfg.summariesAuto !== false) runSummarizer(db, defaultRunner, liveCfg.language).catch(() => {});
     try { runLinks(db); } catch {}
     enrichPRs(db, defaultGhRunner).catch(() => {});
     enrichLinear(db, liveCfg.linearToken).catch(() => {});
-    syncDeadlines(db, { llmRunner: defaultRunner, linearToken: liveCfg.linearToken }).catch(() => {});
+    const llmRunnerForDeadlines = liveCfg.summariesAuto === true ? defaultRunner : undefined;
+    syncDeadlines(db, { llmRunner: llmRunnerForDeadlines, linearToken: liveCfg.linearToken, cfg: liveCfg }).catch(() => {});
   }, 300_000);
   setInterval(() => {
     const liveCfg = loadConfig();
-    if (liveCfg.dailyAuto !== false) generateDaily(db, defaultRunner, liveCfg.language, Date.now()).catch(() => {});
+    if (liveCfg.summariesAuto === true) runSummarizer(db, defaultRunner, liveCfg.language, liveCfg).catch(() => {});
   }, 3_600_000);
-  runSlack(db, slackDefaultRunner, defaultRunner, cfg, Date.now()).catch(() => {});
-  setInterval(
-    () => runSlack(db, slackDefaultRunner, defaultRunner, cfg, Date.now()).catch(() => {}),
-    900_000
-  );
+  setInterval(() => {
+    const liveCfg = loadConfig();
+    if (liveCfg.slackAuto === true) runSlack(db, slackDefaultRunner, defaultRunner, liveCfg, Date.now(), liveCfg).catch(() => {});
+  }, 1_800_000);
   const srv = createServer(db);
   console.log(`claude-live on http://localhost:${srv.port}`);
 }
