@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { watch } from "node:fs";
 import { openDb } from "./db";
 import { sweep } from "./sweeper";
-import { loadConfig, saveConfig } from "./config";
+import { loadConfig, saveConfig, type Config } from "./config";
 import { detectInstances } from "./setup";
 import { homedir } from "node:os";
 import { runSummarizer, summarizeOne, defaultRunner, type LlmRunner } from "./summarizer";
@@ -63,7 +63,7 @@ const INBOX_SIGNALS_SQL = `
 
 const DEBOUNCE_MS = 60 * 60 * 1000;
 
-function buildUsagePayload(db: Database, cfg: any, now: number): object {
+function buildUsagePayload(db: Database, cfg: Config, now: number): object {
   const startOfToday = now - (now % 86400000);
   const startOfWeek = startOfToday - 7 * 86400000;
 
