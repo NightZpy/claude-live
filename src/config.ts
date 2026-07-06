@@ -18,6 +18,8 @@ export type Config = {
   claudeConfigDir?: string;
   claudePath?: string;
   mentionName?: string;
+  llmPaused?: boolean;
+  llmDailyCap?: number;
 };
 
 export const DEFAULT_CONFIG: Config = {

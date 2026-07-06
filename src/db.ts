@@ -112,6 +112,14 @@ CREATE TABLE IF NOT EXISTS deadlines (
   updated_at INTEGER,
   UNIQUE(source, ref)
 );
+CREATE TABLE IF NOT EXISTS llm_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  model TEXT,
+  duration_ms INTEGER,
+  ok INTEGER
+);
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status, last_activity);
 CREATE INDEX IF NOT EXISTS idx_mentions_resolved ON mentions(resolved, last_at);
