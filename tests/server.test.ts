@@ -778,6 +778,7 @@ describe("/api/config", () => {
       srv.stop();
     } finally {
       try { unlinkSync(transcript); } catch {}
+      saveConfig(DEFAULT_CONFIG);
     }
   });
 
@@ -801,6 +802,7 @@ describe("/api/config", () => {
       srv.stop();
     } finally {
       try { unlinkSync(transcript); } catch {}
+      saveConfig(DEFAULT_CONFIG);
     }
   });
 

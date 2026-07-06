@@ -224,8 +224,12 @@ export async function syncDeadlines(
     try { await syncLinearDeadlines(db, opts.linearToken); } catch {}
   }
   if (opts.llmRunner) {
-    try { await extractSlackDeadlines(db, opts.llmRunner, Date.now(), opts.cfg); } catch {}
-    try { await extractInSessionDeadlines(db, opts.llmRunner, Date.now(), opts.cfg); } catch {}
+    try { await extractSlackDeadlines(db, opts.llmRunner, Date.now(), opts.cfg); } catch (err) {
+      if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) throw err;
+    }
+    try { await extractInSessionDeadlines(db, opts.llmRunner, Date.now(), opts.cfg); } catch (err) {
+      if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) throw err;
+    }
   }
   try { extractPRDeadlines(db, Date.now()); } catch {}
 }
