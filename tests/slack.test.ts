@@ -80,7 +80,7 @@ test("fetchMentions parses canned JSON array from runner", async () => {
     makeMention({ channel: "C002", ts: "1751000001.000002", text: "Lenyn are you around?" }),
   ];
   const runner: SlackRunner = async () => JSON.stringify(canned);
-  const result = await fetchMentions(runner, Date.now() - 3600_000);
+  const result = await fetchMentions(runner, Date.now() - 3600_000, "Sam");
   expect(result).toHaveLength(2);
   expect(result[0].text).toBe("hey Lenyn can you review this?");
   expect(result[1].channel).toBe("C002");
@@ -92,19 +92,19 @@ test("fetchMentions passes SLACK_ALLOWED_TOOLS to runner", async () => {
     capturedTools = tools;
     return "[]";
   };
-  await fetchMentions(runner, Date.now());
+  await fetchMentions(runner, Date.now(), "Sam");
   expect(capturedTools).toEqual(SLACK_ALLOWED_TOOLS);
 });
 
 test("fetchMentions returns [] when runner returns SLACK_UNAVAILABLE", async () => {
   const runner: SlackRunner = async () => "SLACK_UNAVAILABLE";
-  const result = await fetchMentions(runner, Date.now());
+  const result = await fetchMentions(runner, Date.now(), "Sam");
   expect(result).toEqual([]);
 });
 
 test("fetchMentions returns [] on malformed JSON (no throw)", async () => {
   const runner: SlackRunner = async () => "not json at all !!!";
-  const result = await fetchMentions(runner, Date.now());
+  const result = await fetchMentions(runner, Date.now(), "Sam");
   expect(result).toEqual([]);
 });
 
@@ -112,7 +112,7 @@ test("fetchMentions returns [] when runner throws (no throw)", async () => {
   const runner: SlackRunner = async () => {
     throw new Error("CLI failed");
   };
-  const result = await fetchMentions(runner, Date.now());
+  const result = await fetchMentions(runner, Date.now(), "Sam");
   expect(result).toEqual([]);
 });
 
@@ -124,7 +124,7 @@ test("fetchMentions filters out items missing required fields", async () => {
     "garbage",
   ];
   const runner: SlackRunner = async () => JSON.stringify(mixed);
-  const result = await fetchMentions(runner, Date.now());
+  const result = await fetchMentions(runner, Date.now(), "Sam");
   expect(result).toHaveLength(1);
   expect(result[0].channel).toBe("C001");
 });
@@ -133,7 +133,7 @@ test("fetchMentions tolerates JSON embedded in prose (extracts first [...] block
   const canned = [makeMention()];
   const runner: SlackRunner = async () =>
     `Here are the mentions:\n${JSON.stringify(canned)}\nThat's all.`;
-  const result = await fetchMentions(runner, Date.now());
+  const result = await fetchMentions(runner, Date.now(), "Sam");
   expect(result).toHaveLength(1);
 });
 
@@ -143,7 +143,7 @@ test("fetchMentions prompt instructs single search call and no thread/user looku
     capturedPrompt = prompt;
     return "[]";
   };
-  await fetchMentions(runner, Date.now());
+  await fetchMentions(runner, Date.now(), "Sam");
   expect(capturedPrompt.toLowerCase()).toContain("single");
   expect(capturedPrompt.toLowerCase()).toContain("do not open threads");
   // must not list participants or author_id as required fields (per-sentence check)
@@ -157,7 +157,7 @@ test("fetchMentions prompt requires only single-search-obtainable required field
     capturedPrompt = prompt;
     return "[]";
   };
-  await fetchMentions(runner, Date.now());
+  await fetchMentions(runner, Date.now(), "Sam");
   // must require the 4 fields obtainable from one search call
   expect(capturedPrompt).toContain("channel");
   expect(capturedPrompt).toContain("author");
@@ -341,7 +341,7 @@ test("upsertMention stores separate rows for different ts values", () => {
 test("fetchMentions SLACK_UNAVAILABLE yields no rows after upsert loop", async () => {
   const db = openDb(":memory:");
   const runner: SlackRunner = async () => "SLACK_UNAVAILABLE";
-  const mentions = await fetchMentions(runner, Date.now());
+  const mentions = await fetchMentions(runner, Date.now(), "Sam");
   for (const m of mentions) upsertMention(db, m, Date.now());
   const count = (db.query("SELECT COUNT(*) as c FROM mentions").get() as any).c;
   expect(count).toBe(0);
@@ -540,7 +540,7 @@ test("runSlack sequences fetch → upsert → heuristic → match (fake runners,
 
   await runSlack(
     db, slackRunner, llmRunner,
-    { slackChannelsAlerts: ["alerts-prod"], slackChannelsDeploys: [], language: "es" },
+    { slackChannelsAlerts: ["alerts-prod"], slackChannelsDeploys: [], language: "es", mentionName: "Sam" },
     now
   );
 
@@ -567,7 +567,7 @@ test("runSlack resolves old mention via heuristic during run", async () => {
   expect(row.resolved).toBe(1); // heuristic resolved it
 });
 
-test("runSlack works with empty config (no Slack channels)", async () => {
+test("runSlack works with empty config (no Slack channels, no mentionName)", async () => {
   const db = openDb(":memory:");
   let slackCallCount = 0;
   const slackRunner: SlackRunner = async () => { slackCallCount++; return "[]"; };
@@ -575,9 +575,8 @@ test("runSlack works with empty config (no Slack channels)", async () => {
 
   await runSlack(db, slackRunner, llmRunner, {}, Date.now());
 
-  // fetchMentions always runs; fetchSignals skips when no channels.
-  // Valid empty "[]" is success — no retry — so fetchMentions calls the runner exactly once.
-  expect(slackCallCount).toBe(1);
+  // No mentionName → fetchMentions skips without calling runner. No channels → fetchSignals skips too.
+  expect(slackCallCount).toBe(0);
 });
 
 // --- retry logic ---
@@ -590,7 +589,7 @@ test("fetchMentions retries on max-turns and returns result from second call", a
     if (callCount === 1) return "Error: Reached max turns";
     return JSON.stringify(canned);
   };
-  const result = await fetchMentions(runner, Date.now());
+  const result = await fetchMentions(runner, Date.now(), "Sam");
   expect(result).toHaveLength(1);
   expect(result[0].text).toBe("retry worked");
   expect(callCount).toBe(2);
@@ -598,7 +597,7 @@ test("fetchMentions retries on max-turns and returns result from second call", a
 
 test("fetchMentions returns [] when both calls hit max-turns", async () => {
   const runner: SlackRunner = async () => "Error: Reached max turns";
-  const result = await fetchMentions(runner, Date.now());
+  const result = await fetchMentions(runner, Date.now(), "Sam");
   expect(result).toEqual([]);
 });
 
@@ -608,7 +607,110 @@ test("fetchMentions does not retry when runner returns SLACK_UNAVAILABLE (call c
     callCount++;
     return SLACK_UNAVAILABLE;
   };
-  const result = await fetchMentions(runner, Date.now());
+  const result = await fetchMentions(runner, Date.now(), "Sam");
   expect(result).toEqual([]);
   expect(callCount).toBe(1);
+});
+
+// --- one-shot / mentionName guards ---
+
+test("fetchMentions with empty mentionName makes zero runner calls", async () => {
+  let calls = 0;
+  const runner: SlackRunner = async () => { calls++; return "[]"; };
+  const result = await fetchMentions(runner, Date.now(), "");
+  expect(result).toEqual([]);
+  expect(calls).toBe(0);
+});
+
+test("fetchMentions with undefined mentionName (default) makes zero runner calls", async () => {
+  let calls = 0;
+  const runner: SlackRunner = async () => { calls++; return "[]"; };
+  const result = await fetchMentions(runner, Date.now());
+  expect(result).toEqual([]);
+  expect(calls).toBe(0);
+});
+
+test("fetchMentions prompt uses configured mentionName", async () => {
+  let capturedPrompt = "";
+  const runner: SlackRunner = async (prompt) => { capturedPrompt = prompt; return "[]"; };
+  await fetchMentions(runner, Date.now(), "Sam");
+  expect(capturedPrompt).toContain("Sam");
+  expect(capturedPrompt).not.toContain("Lenyn");
+});
+
+// --- matchToSessions one-shot via match_attempted_at ---
+
+test("matchToSessions sets match_attempted_at after attempt", async () => {
+  const db = openDb(":memory:");
+  insertSession(db, "s-ma", { name: "xyz project", cwd: "/home/user/xyz" });
+  upsertMention(db, makeMention({ text: "no tokens overlap here", channel_id: "C-ma", thread_ts: "ts-ma" }), 1000);
+
+  const runner: LlmRunner = async () => "[]";
+  await matchToSessions(db, runner, "es", Date.now());
+
+  const row = db.query("SELECT match_attempted_at FROM mentions WHERE channel_id='C-ma'").get() as any;
+  expect(row.match_attempted_at).toBeGreaterThan(0);
+});
+
+test("matchToSessions skips mention whose match_attempted_at is within 24h", async () => {
+  const db = openDb(":memory:");
+  const now = 1_000_000_000_000;
+  insertSession(db, "s-skip", { name: "proj", cwd: "/home/user/proj" });
+  upsertMention(db, makeMention({ text: "vague text", channel_id: "C-skip", thread_ts: "ts-skip" }), 1000);
+  // Manually set match_attempted_at to 1h ago (within 24h window)
+  db.run("UPDATE mentions SET match_attempted_at=? WHERE channel_id='C-skip'", [now - 3_600_000]);
+
+  let calls = 0;
+  const runner: LlmRunner = async () => { calls++; return "[]"; };
+  await matchToSessions(db, runner, "es", now);
+
+  expect(calls).toBe(0); // skipped entirely
+});
+
+test("matchToSessions retries mention whose match_attempted_at is older than 24h", async () => {
+  const db = openDb(":memory:");
+  const now = 1_000_000_000_000;
+  insertSession(db, "s-retry", { name: "proj", cwd: "/home/user/proj" });
+  upsertMention(db, makeMention({ text: "vague text", channel_id: "C-retry", thread_ts: "ts-retry" }), 1000);
+  // Manually set match_attempted_at to 25h ago (outside 24h window)
+  db.run("UPDATE mentions SET match_attempted_at=? WHERE channel_id='C-retry'", [now - 90_000_000]);
+
+  let calls = 0;
+  const runner: LlmRunner = async () => { calls++; return "[]"; };
+  await matchToSessions(db, runner, "es", now);
+
+  expect(calls).toBe(1); // retried because older than 24h
+});
+
+// --- upsertMention re-ask resets deadline_checked_at ---
+
+test("upsertMention re-ask with newer ts updates text and resets deadline_checked_at", () => {
+  const db = openDb(":memory:");
+  // Insert original mention with thread_ts explicitly set
+  upsertMention(db, makeMention({ thread_ts: "T001", ts: "1751000000.000001" }), 1000);
+  // Simulate deadline already checked
+  db.run("UPDATE mentions SET deadline_checked_at=9999 WHERE ts='1751000000.000001'");
+  let row = db.query("SELECT deadline_checked_at FROM mentions WHERE ts='1751000000.000001'").get() as any;
+  expect(row.deadline_checked_at).toBe(9999);
+
+  // Re-ask: same thread_ts, newer ts
+  upsertMention(db, makeMention({ thread_ts: "T001", ts: "1751000001.000001", text: "updated re-ask text" }), 2000);
+
+  // deadline_checked_at should be reset and text updated
+  const updated = db.query("SELECT text, deadline_checked_at, ts FROM mentions WHERE thread_ts='T001'").get() as any;
+  expect(updated.text).toBe("updated re-ask text");
+  expect(updated.ts).toBe("1751000001.000001");
+  expect(updated.deadline_checked_at).toBeNull();
+  // Still only one row
+  const count = (db.query("SELECT COUNT(*) as c FROM mentions WHERE thread_ts='T001'").get() as any).c;
+  expect(count).toBe(1);
+});
+
+test("upsertMention re-ask with older ts does NOT update text", () => {
+  const db = openDb(":memory:");
+  upsertMention(db, makeMention({ thread_ts: "T002", ts: "1751000010.000001", text: "newer first" }), 1000);
+  // Attempt to update with an older ts — should be ignored
+  upsertMention(db, makeMention({ thread_ts: "T002", ts: "1751000005.000001", text: "older message" }), 2000);
+  const row = db.query("SELECT text FROM mentions WHERE thread_ts='T002'").get() as any;
+  expect(row.text).toBe("newer first");
 });

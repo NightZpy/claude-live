@@ -180,6 +180,10 @@ export function openDb(path: string = dbPath()): Database {
     ["daily", "yesterday_md_en TEXT"],
     ["daily", "today_md_en TEXT"],
     ["daily", "blockers_md_en TEXT"],
+    ["mentions", "deadline_checked_at INTEGER"],
+    ["sessions", "deadline_checked_at INTEGER"],
+    ["mentions", "match_attempted_at INTEGER"],
+    ["signals", "match_attempted_at INTEGER"],
   ];
   for (const [table, colDef] of guardedCols) {
     try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${colDef}`); } catch {}

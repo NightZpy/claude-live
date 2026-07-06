@@ -57,3 +57,12 @@ test("DEFAULT_CONFIG has all LLM jobs opted out by default", () => {
   expect(DEFAULT_CONFIG.dailyAuto).toBe(false);
   expect(DEFAULT_CONFIG.slackAuto).toBe(false);
 });
+
+test("DEFAULT_CONFIG mentionName defaults to empty string", () => {
+  expect(DEFAULT_CONFIG.mentionName).toBe("");
+});
+
+test("loadConfig mentionName defaults to empty string when file missing", () => {
+  const c = loadConfig();
+  expect(c.mentionName).toBe("");
+});

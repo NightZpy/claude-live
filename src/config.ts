@@ -17,6 +17,7 @@ export type Config = {
   claudeBin?: string;
   claudeConfigDir?: string;
   claudePath?: string;
+  mentionName?: string;
 };
 
 export const DEFAULT_CONFIG: Config = {
@@ -30,6 +31,7 @@ export const DEFAULT_CONFIG: Config = {
   dailyAuto: false,
   slackAuto: false,
   slackToken: "",
+  mentionName: "",
 };
 
 export function homeDir(): string {

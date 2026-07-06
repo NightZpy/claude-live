@@ -80,6 +80,7 @@ const I18N = {
     settings_instances: "Instancias activas",
     settings_slack_token: "Slack token",
     settings_linear_token: "Linear token",
+    settings_mention_name: "Nombre a buscar en Slack",
     summary_generate: "generar resumen",
     settings_slack_token_set: "configurado ····",
     settings_save: "Guardar",
@@ -177,6 +178,7 @@ const I18N = {
     settings_instances: "Active instances",
     settings_slack_token: "Slack token",
     settings_linear_token: "Linear token",
+    settings_mention_name: "Slack mention name",
     summary_generate: "generate summary",
     settings_slack_token_set: "set ····",
     settings_save: "Save",
@@ -274,6 +276,7 @@ const I18N = {
     settings_instances: "Instâncias ativas",
     settings_slack_token: "Slack token",
     settings_linear_token: "Linear token",
+    settings_mention_name: "Nome a buscar no Slack",
     summary_generate: "gerar resumo",
     settings_slack_token_set: "configurado ····",
     settings_save: "Salvar",
@@ -1644,6 +1647,10 @@ function openSettings() {
             '<button class="sbtn-clear" id="s-lintoken-clear">' + esc(t.settings_clear || 'Clear') + '</button>' +
           '</div>' +
         '</div>' +
+        '<div class="sfield">' +
+          '<label>' + esc(t.settings_mention_name || 'Slack mention name') + '</label>' +
+          '<input type="text" id="s-mention-name" value="' + esc(cfg.mentionName || '') + '">' +
+        '</div>' +
         '<button class="sbtn-save" id="s-save">' + esc(t.settings_save || 'Save') + '</button>';
 
       document.getElementById('s-token-clear').addEventListener('click', function() {
@@ -1711,6 +1718,9 @@ function saveSettings() {
     }
     // if tokVal is empty and not cleared, and token was set: omit → server keeps token
   }
+
+  var mentionNameEl = document.getElementById('s-mention-name');
+  if (mentionNameEl) payload.mentionName = mentionNameEl.value;
 
   var linEl = document.getElementById('s-lintoken');
   if (linEl) {

@@ -28,10 +28,18 @@ type MentionRow = {
 };
 
 export async function extractSlackDeadlines(db: Database, llmRunner: LlmRunner, now: number): Promise<void> {
-  const mentions = db.query("SELECT channel_id, thread_ts, author, text, ts, session_id FROM mentions").all() as MentionRow[];
+  const mentions = db.query("SELECT channel_id, thread_ts, author, text, ts, session_id FROM mentions WHERE deadline_checked_at IS NULL").all() as MentionRow[];
   for (const mention of mentions) {
     const text = mention.text ?? "";
-    if (!DATE_HINT_RE.test(text)) continue;
+    // Always mark as checked at the end of this iteration, regardless of outcome
+    const markChecked = () => {
+      db.run("UPDATE mentions SET deadline_checked_at=? WHERE channel_id=? AND ts=?", [now, mention.channel_id, mention.ts]);
+    };
+
+    if (!DATE_HINT_RE.test(text)) {
+      markChecked();
+      continue;
+    }
 
     const nonce = Math.random().toString(36).slice(2, 10);
     const nowIso = new Date(now).toISOString();
@@ -46,18 +54,25 @@ export async function extractSlackDeadlines(db: Database, llmRunner: LlmRunner, 
     try {
       raw = await llmRunner(prompt);
     } catch {
+      markChecked();
       continue;
     }
 
     const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) continue;
+    if (!match) {
+      markChecked();
+      continue;
+    }
 
     let parsed: { due_at?: unknown; estimate_hours?: unknown; title?: unknown };
     try {
       parsed = JSON.parse(match[0]);
     } catch {
+      markChecked();
       continue;
     }
+
+    markChecked();
 
     if (typeof parsed.due_at !== "number") continue;
 
@@ -86,6 +101,8 @@ type SessionRow = {
   id: string;
   transcript_path: string | null;
   instance: string | null;
+  last_activity: number | null;
+  deadline_checked_at: number | null;
 };
 
 type LinkRow = {
@@ -141,20 +158,32 @@ async function processOneSessionDeadlines(db: Database, session: SessionRow, llm
 
 export async function extractInSessionDeadlines(db: Database, llmRunner: LlmRunner, now: number): Promise<void> {
   const sessions = db.query(
-    "SELECT id, transcript_path, instance FROM sessions WHERE status NOT IN ('ended','archived') AND (kind IS NULL OR kind != 'worker')"
+    "SELECT id, transcript_path, instance, last_activity, deadline_checked_at FROM sessions WHERE status NOT IN ('ended','archived') AND (kind IS NULL OR kind != 'worker')"
   ).all() as SessionRow[];
 
   for (const session of sessions) {
+    // Skip if already checked and nothing new since last check
+    if (session.deadline_checked_at !== null && session.last_activity !== null &&
+        session.deadline_checked_at >= session.last_activity) {
+      continue;
+    }
     await processOneSessionDeadlines(db, session, llmRunner, now);
+    db.run("UPDATE sessions SET deadline_checked_at=? WHERE id=?", [now, session.id]);
   }
 }
 
 export async function extractInSessionDeadlinesForSession(db: Database, sessionId: string, llmRunner: LlmRunner, now: number): Promise<void> {
   const session = db.query(
-    "SELECT id, transcript_path, instance FROM sessions WHERE id=?"
+    "SELECT id, transcript_path, instance, last_activity, deadline_checked_at FROM sessions WHERE id=?"
   ).get(sessionId) as SessionRow | null;
   if (!session) return;
+  // Skip if already checked and nothing new since last check
+  if (session.deadline_checked_at !== null && session.last_activity !== null &&
+      session.deadline_checked_at >= session.last_activity) {
+    return;
+  }
   await processOneSessionDeadlines(db, session, llmRunner, now);
+  db.run("UPDATE sessions SET deadline_checked_at=? WHERE id=?", [now, session.id]);
 }
 
 export function extractPRDeadlines(db: Database, now: number): void {

@@ -110,11 +110,13 @@ async function runWithRetry(
 
 export async function fetchMentions(
   runner: SlackRunner,
-  sinceTs: number
+  sinceTs: number,
+  mentionName: string = ""
 ): Promise<RawMention[]> {
+  if (!mentionName) return [];
   const sinceDate = new Date(sinceTs).toISOString();
   const prompt =
-    `Search Slack for messages mentioning "Lenyn" or "@lenyn" since ${sinceDate}. ` +
+    `Search Slack for messages mentioning "${mentionName}" or "@${mentionName.toLowerCase()}" since ${sinceDate}. ` +
     `Use a SINGLE slack_search_public_and_private call — do NOT open threads, do NOT look up user IDs, do NOT call any other tool. ` +
     `Return STRICT JSON ONLY — a JSON array, no markdown, no explanation. ` +
     `Each item must have: channel (string — name or ID from the search result), author (string), text (string), ts (string). ` +
@@ -194,11 +196,27 @@ export function upsertMention(db: Database, raw: RawMention, now: number): void 
   const participantsJson = JSON.stringify(raw.participants ?? []);
 
   type ExRow = { id: number; ts: string | null };
-  const existing = db
-    .query("SELECT id, ts FROM mentions WHERE channel_id=? AND ts=?")
-    .get(channel, raw.ts) as ExRow | null;
 
-  if (!existing) {
+  // Exact same message already stored — idempotent
+  const sameMsg = db
+    .query("SELECT id FROM mentions WHERE channel_id=? AND ts=?")
+    .get(channel, raw.ts) as ExRow | null;
+  if (sameMsg) return;
+
+  // Same thread/author but newer ts — update text and reset deadline_checked_at
+  const sameThread = db
+    .query("SELECT id, ts FROM mentions WHERE channel_id=? AND thread_ts=? AND author=?")
+    .get(channel, threadTs, raw.author) as ExRow | null;
+  if (sameThread && raw.ts > (sameThread.ts ?? "")) {
+    db.run(
+      `UPDATE mentions SET text=?, ts=?, last_at=?, deadline_checked_at=NULL WHERE id=?`,
+      [raw.text, raw.ts, now, sameThread.id]
+    );
+    return;
+  }
+
+  // Brand-new mention
+  if (!sameThread) {
     db.run(
       `INSERT OR IGNORE INTO mentions
          (channel_id, channel_name, thread_ts, author, author_id, participants, text, ts,
@@ -308,12 +326,13 @@ export async function matchToSessions(
   language: string = "es",
   now: number = Date.now()
 ): Promise<void> {
+  const retryThreshold = now - 86_400_000;
   const unlinkedMentions = db
-    .query("SELECT id, text FROM mentions WHERE session_id IS NULL AND resolved = 0")
-    .all() as MentionRow[];
+    .query("SELECT id, text FROM mentions WHERE session_id IS NULL AND resolved = 0 AND (match_attempted_at IS NULL OR match_attempted_at < ?)")
+    .all(retryThreshold) as MentionRow[];
   const unlinkedSignals = db
-    .query("SELECT id, text, channel FROM signals WHERE session_id IS NULL")
-    .all() as SignalRow[];
+    .query("SELECT id, text, channel FROM signals WHERE session_id IS NULL AND (match_attempted_at IS NULL OR match_attempted_at < ?)")
+    .all(retryThreshold) as SignalRow[];
 
   if (unlinkedMentions.length === 0 && unlinkedSignals.length === 0) return;
 
@@ -345,7 +364,7 @@ export async function matchToSessions(
       else if (score > secondScore) { secondScore = score; }
     }
     if (topScore >= 2 && topScore > secondScore) {
-      db.run(`UPDATE ${table} SET session_id = ? WHERE id = ?`, [topId, id]);
+      db.run(`UPDATE ${table} SET session_id = ?, match_attempted_at = ? WHERE id = ?`, [topId, now, id]);
     } else {
       ambiguous.push({ table, id, text: text ?? "" });
     }
@@ -382,26 +401,36 @@ export async function matchToSessions(
   try {
     raw = await llmRunner(prompt);
   } catch {
+    // Still stamp all ambiguous items so they aren't retried immediately
+    for (const { table, id } of ambiguous) {
+      db.run(`UPDATE ${table} SET match_attempted_at = ? WHERE id = ?`, [now, id]);
+    }
     return;
   }
 
   const arrMatch = raw.match(/\[[\s\S]*\]/);
-  if (!arrMatch) return;
+  // Stamp all ambiguous items regardless of parse outcome
   try {
-    const results = JSON.parse(arrMatch[0]);
-    if (!Array.isArray(results)) return;
-    for (const item of results) {
-      if (!item || typeof item !== "object") continue;
-      const idx = (item as Record<string, unknown>).idx;
-      const sessionId = (item as Record<string, unknown>).session_id;
-      if (typeof idx !== "number" || idx < 0 || idx >= ambiguous.length) continue;
-      if (typeof sessionId !== "string" || !sessionId) continue;
-      if (!sessions.find(s => s.id === sessionId)) continue;
-      const { table, id } = ambiguous[idx];
-      db.run(`UPDATE ${table} SET session_id = ? WHERE id = ?`, [sessionId, id]);
+    if (arrMatch) {
+      const results = JSON.parse(arrMatch[0]);
+      if (Array.isArray(results)) {
+        for (const item of results) {
+          if (!item || typeof item !== "object") continue;
+          const idx = (item as Record<string, unknown>).idx;
+          const sessionId = (item as Record<string, unknown>).session_id;
+          if (typeof idx !== "number" || idx < 0 || idx >= ambiguous.length) continue;
+          if (typeof sessionId !== "string" || !sessionId) continue;
+          if (!sessions.find(s => s.id === sessionId)) continue;
+          const { table, id } = ambiguous[idx];
+          db.run(`UPDATE ${table} SET session_id = ? WHERE id = ?`, [sessionId, id]);
+        }
+      }
     }
   } catch {
-    // ignore
+    // ignore parse errors
+  }
+  for (const { table, id } of ambiguous) {
+    db.run(`UPDATE ${table} SET match_attempted_at = ? WHERE id = ?`, [now, id]);
   }
 }
 
@@ -413,6 +442,7 @@ export type SlackConfig = {
   slackChannelsAlerts?: string[];
   slackChannelsDeploys?: string[];
   language?: string;
+  mentionName?: string;
 };
 
 export async function runSlack(
@@ -427,7 +457,7 @@ export async function runSlack(
   const language = config.language ?? "es";
 
   const sinceTs = now - 86_400_000;
-  const mentions = await fetchMentions(slackRunner, sinceTs);
+  const mentions = await fetchMentions(slackRunner, sinceTs, config.mentionName ?? "");
   for (const m of mentions) upsertMention(db, m, now);
 
   const signals = await fetchSignals(slackRunner, alertChannels, deployChannels);

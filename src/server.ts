@@ -240,6 +240,7 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           linearTokenLast4: linTokenLast4,
           instances: c.instances,
           detectedInstances: detectInstances(homedir()),
+          mentionName: c.mentionName ?? "",
         });
       }
       if (url.pathname === "/api/config" && req.method === "POST") {
@@ -312,6 +313,9 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           }
           // masked placeholder → do not overwrite
         }
+        if ("mentionName" in patch && typeof patch.mentionName === "string") {
+          current.mentionName = patch.mentionName;
+        }
 
         saveConfig(current);
 
@@ -335,6 +339,7 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           linearTokenLast4: linTokenLast4,
           instances: c.instances,
           detectedInstances: detectInstances(homedir()),
+          mentionName: c.mentionName ?? "",
         });
       }
       if (url.pathname === "/api/deadlines" && req.method === "GET") {
