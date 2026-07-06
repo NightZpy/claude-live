@@ -1829,7 +1829,7 @@ function renderUsage(usage) {
   var banner = document.getElementById('paused-banner');
   if (banner) {
     if (usage.paused) {
-      banner.textContent = esc(t.usage_paused || 'LLM en pausa');
+      banner.textContent = t.usage_paused || 'LLM en pausa';
       banner.removeAttribute('hidden');
     } else {
       banner.setAttribute('hidden', '');

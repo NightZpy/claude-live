@@ -4,6 +4,7 @@ import type { Database } from "bun:sqlite";
 import { openDb } from "../src/db";
 import { analyzeSession } from "../src/analyze-session";
 import type { LlmRunner } from "../src/summarizer";
+import type { Config } from "../src/config";
 
 const FAKE_TRANSCRIPT = "/tmp/cl-analyze-session-test-transcript.jsonl";
 
@@ -123,4 +124,29 @@ test("analyzeSession extracts in-session deadlines for archived (SessionEnd) tar
   } finally {
     try { unlinkSync(path); } catch {}
   }
+});
+
+function baseCfg(overrides: Partial<Config> = {}): Config {
+  return { language: "en", port: 7777, instances: [], ...overrides };
+}
+
+test("analyzeSession skips all LLM work when llmPaused=true", async () => {
+  const db = openDb(":memory:");
+  insertSession(db, "sess-paused", null, null);
+  let calls = 0;
+  const fakeRunner: LlmRunner = async () => { calls++; return "{}"; };
+  await analyzeSession(db, "sess-paused", fakeRunner, Date.now(), baseCfg({ llmPaused: true }));
+  expect(calls).toBe(0);
+});
+
+test("analyzeSession skips all LLM work when daily cap is reached", async () => {
+  const db = openDb(":memory:");
+  insertSession(db, "sess-cap", null, null);
+  const now = Date.now();
+  // Fill cap (default 100) — use llmDailyCap:1 and one existing row
+  db.run("INSERT INTO llm_calls (ts, kind, ok) VALUES (?,?,?)", [now - 100, "x", 1]);
+  let calls = 0;
+  const fakeRunner: LlmRunner = async () => { calls++; return "{}"; };
+  await analyzeSession(db, "sess-cap", fakeRunner, now, baseCfg({ llmDailyCap: 1 }));
+  expect(calls).toBe(0);
 });

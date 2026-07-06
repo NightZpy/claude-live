@@ -462,6 +462,7 @@ export async function runSlack(
   now: number,
   cfg?: Config,
 ): Promise<void> {
+  // Gate the entire function: signals/mentions fetching uses LLM for matching, so blocking here is intentional.
   if (cfg) {
     const { allowed, reason } = llmAllowed(db, cfg, now);
     if (!allowed) throw new Error('LLM_BLOCKED:' + reason);

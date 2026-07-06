@@ -3,6 +3,11 @@ import type { Database } from "bun:sqlite";
 import { openDb } from "../src/db";
 import { buildDailyDigest, generateDaily, dateKey } from "../src/daily";
 import type { LlmRunner } from "../src/summarizer";
+import type { Config } from "../src/config";
+
+function baseCfg(overrides: Partial<Config> = {}): Config {
+  return { language: "en", port: 7777, instances: [], ...overrides };
+}
 
 const NOW = 1_750_000_000_000;
 const NOW_24H_AGO = NOW - 86_400_000;
@@ -267,4 +272,26 @@ test("generateDaily with only es (no en key) stores es fields, en fields are nul
   expect(result!.blockers_md_en).toBeNull();
   const row = db.query("SELECT * FROM daily WHERE date = ?").get(result!.date) as any;
   expect(row.yesterday_md_en).toBeNull();
+});
+
+test("generateDaily throws LLM_BLOCKED:paused when llmPaused=true", async () => {
+  const db = openDb(":memory:");
+  let calls = 0;
+  const fakeRunner: LlmRunner = async () => { calls++; return "{}"; };
+  await expect(
+    generateDaily(db, fakeRunner, "en", NOW, baseCfg({ llmPaused: true }))
+  ).rejects.toThrow("LLM_BLOCKED:paused");
+  expect(calls).toBe(0);
+});
+
+test("generateDaily throws LLM_BLOCKED:cap when cap is reached", async () => {
+  const db = openDb(":memory:");
+  // runGated uses Date.now() for the cap window — insert a row at real current time
+  db.run("INSERT INTO llm_calls (ts, kind, ok) VALUES (?,?,?)", [Date.now() - 100, "x", 1]);
+  let calls = 0;
+  const fakeRunner: LlmRunner = async () => { calls++; return "{}"; };
+  await expect(
+    generateDaily(db, fakeRunner, "en", NOW, baseCfg({ llmDailyCap: 1 }))
+  ).rejects.toThrow("LLM_BLOCKED:cap");
+  expect(calls).toBe(0);
 });
