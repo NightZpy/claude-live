@@ -15,6 +15,7 @@ import { notify, checkNotifications } from "./notify";
 import { runLinks, enrichPRs, defaultGhRunner } from "./links";
 import { enrichLinear } from "./linear";
 import { syncDeadlines } from "./deadlines";
+import { llmAllowed } from "./llm-gate";
 
 const UI_DIR = join(import.meta.dir, "../ui");
 const STATIC = new Set(["index.html", "app.js", "style.css"]);
@@ -109,7 +110,7 @@ function llmBlockedResponse(err: unknown): Response | null {
   return null;
 }
 
-export function createServer(db: Database, opts: { port?: number; dailyRunner?: LlmRunner } = {}) {
+export function createServer(db: Database, opts: { port?: number; dailyRunner?: LlmRunner; refreshRunner?: LlmRunner } = {}) {
   const cfg = loadConfig();
   const port = opts.port ?? Number(process.env.PORT ?? cfg.port);
 
@@ -489,6 +490,91 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         const id = Number(dlIdM[1]);
         db.run("UPDATE deadlines SET status = 'dismissed', updated_at = ? WHERE id = ?", [Date.now(), id]);
         return Response.json({ ok: true });
+      }
+      if (url.pathname === "/api/refresh" && req.method === "POST") {
+        const freshCfg = loadConfig();
+        const now = Date.now();
+        const runner = opts.refreshRunner ?? defaultRunner;
+
+        const { allowed, reason } = llmAllowed(db, freshCfg, now);
+        if (!allowed) {
+          return Response.json({
+            summaries: 0,
+            slack_ok: false,
+            deadlines_checked: 0,
+            daily: false,
+            llm_calls_used: 0,
+            blocked: reason,
+          });
+        }
+
+        type CountRow = { n: number };
+        const before = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
+
+        let summaries = 0;
+        let slack_ok = false;
+        let deadlines_checked = 0;
+        let daily = false;
+
+        // 1. Summarizer
+        try {
+          summaries = await runSummarizer(db, runner, freshCfg.language, freshCfg);
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) {
+            const after = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
+            return Response.json({ summaries, slack_ok, deadlines_checked, daily, llm_calls_used: after - before, blocked: err.message.split(':')[1] });
+          }
+        }
+
+        // 2. Slack (only if mentionName configured)
+        if (freshCfg.mentionName) {
+          try {
+            await runSlack(db, slackDefaultRunner, runner, freshCfg, now, freshCfg);
+            slack_ok = true;
+          } catch (err) {
+            if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) {
+              const after = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
+              return Response.json({ summaries, slack_ok, deadlines_checked, daily, llm_calls_used: after - before, blocked: err.message.split(':')[1] });
+            }
+          }
+        }
+
+        // 3. Deadlines
+        try {
+          await syncDeadlines(db, { llmRunner: runner, linearToken: freshCfg.linearToken, cfg: freshCfg });
+          type KindCount = { n: number };
+          deadlines_checked = (db.query(
+            "SELECT COUNT(*) as n FROM llm_calls WHERE kind='deadline' AND ts > ?"
+          ).get(now) as KindCount).n;
+        } catch (err) {
+          if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) {
+            const after = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
+            return Response.json({ summaries, slack_ok, deadlines_checked, daily, llm_calls_used: after - before, blocked: err.message.split(':')[1] });
+          }
+        }
+
+        // 4. Daily (only if ?daily=1)
+        if (url.searchParams.get("daily") === "1") {
+          try {
+            const result = await generateDaily(db, runner, freshCfg.language, now, freshCfg);
+            daily = result !== null;
+          } catch (err) {
+            if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) {
+              const after = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
+              return Response.json({ summaries, slack_ok, deadlines_checked, daily, llm_calls_used: after - before, blocked: err.message.split(':')[1] });
+            }
+          }
+        }
+
+        const after = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
+        return Response.json({
+          summaries,
+          slack_ok,
+          deadlines_checked,
+          daily,
+          llm_calls_used: after - before,
+          blocked: null,
+        });
       }
       const name = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
       if (STATIC.has(name)) return new Response(Bun.file(join(UI_DIR, name)));

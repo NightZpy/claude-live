@@ -1031,6 +1031,77 @@ describe("/api/config", () => {
     srv.stop();
   });
 
+  // --- POST /api/refresh ---
+
+  test("POST /api/refresh when paused: blocked='paused', all counts 0, no llm calls", async () => {
+    saveConfig({ ...DEFAULT_CONFIG, llmPaused: true });
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh`, { method: "POST" });
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect(body.blocked).toBe("paused");
+      expect(body.summaries).toBe(0);
+      expect(body.slack_ok).toBe(false);
+      expect(body.deadlines_checked).toBe(0);
+      expect(body.daily).toBe(false);
+      expect(body.llm_calls_used).toBe(0);
+      // No llm_calls inserted
+      const callCount = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as any).n;
+      expect(callCount).toBe(0);
+    } finally {
+      srv.stop();
+      saveConfig(DEFAULT_CONFIG);
+    }
+  });
+
+  test("POST /api/refresh normal: returns correct shape with blocked:null", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh`, { method: "POST" });
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect(body.blocked).toBeNull();
+      expect(typeof body.summaries).toBe("number");
+      expect(typeof body.slack_ok).toBe("boolean");
+      expect(typeof body.deadlines_checked).toBe("number");
+      expect(typeof body.daily).toBe("boolean");
+      expect(typeof body.llm_calls_used).toBe("number");
+      expect(body.llm_calls_used).toBeGreaterThanOrEqual(0);
+    } finally {
+      srv.stop();
+    }
+  });
+
+  test("POST /api/refresh?daily=1: response includes daily field", async () => {
+    const db = openDb(":memory:");
+    const fakeRunner = async () => '{"es":{"yesterday":"- y","today":"- t","blockers":""},"en":{"yesterday":"- ye","today":"- te","blockers":""}}';
+    const srv = createServer(db, { port: 0, refreshRunner: fakeRunner });
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh?daily=1`, { method: "POST" });
+      expect(res.status).toBe(200);
+      const body = await res.json() as any;
+      expect("daily" in body).toBe(true);
+      expect(typeof body.daily).toBe("boolean");
+    } finally {
+      srv.stop();
+    }
+  });
+
+  test("POST /api/refresh llm_calls_used is >= 0", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh`, { method: "POST" });
+      const body = await res.json() as any;
+      expect(body.llm_calls_used).toBeGreaterThanOrEqual(0);
+    } finally {
+      srv.stop();
+    }
+  });
+
   test("GET /api/usage remaining calculation with custom cap and calls", async () => {
     saveConfig({ ...DEFAULT_CONFIG, llmDailyCap: 5 });
     try {
