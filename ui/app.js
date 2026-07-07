@@ -446,7 +446,7 @@ function buildHeroDropdownItems(projects) {
   // Unlinked open mentions (session_id IS NULL)
   _unlinkedMentionsOpenItems.forEach(function(m) {
     var excerpt = (m.text || "").slice(0, 40);
-    items.push({ proj: null, what: "@ " + esc(m.author) + ": " + excerpt, id: null });
+    items.push({ proj: null, what: "@ " + (m.author || "") + ": " + excerpt, id: null });
   });
   return items;
 }

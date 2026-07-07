@@ -136,15 +136,19 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
       }
       if (url.pathname === "/api/projects") {
         type UnlinkedRow = { id: number; author: string; text: string | null };
+        const unlinkedWhere = `session_id IS NULL
+             AND resolved = 0 AND (resolved_manual IS NULL OR resolved_manual = 0)`;
+        const unlinkedCount = (db.query(
+          `SELECT COUNT(*) c FROM mentions WHERE ${unlinkedWhere}`
+        ).get() as { c: number }).c;
         const unlinkedItems = db.query(
           `SELECT id, author, text FROM mentions
-           WHERE session_id IS NULL
-             AND resolved = 0 AND (resolved_manual IS NULL OR resolved_manual = 0)
+           WHERE ${unlinkedWhere}
            ORDER BY last_at DESC LIMIT 20`
         ).all() as UnlinkedRow[];
         return Response.json({
           projects: listProjects(db, Date.now()),
-          unlinked_mentions_open: unlinkedItems.length,
+          unlinked_mentions_open: unlinkedCount,
           unlinked_mentions_open_items: unlinkedItems,
         });
       }

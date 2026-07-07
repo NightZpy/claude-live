@@ -287,6 +287,24 @@ describe("GET /api/projects", () => {
     expect(typeof p.prs_open).toBe("number");
     srv.stop();
   });
+
+  test("unlinked_mentions_open counts beyond the 20-item dropdown cap", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    for (let i = 0; i < 25; i++) {
+      db.run(
+        `INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved, session_id, first_at, last_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        ["C1", `t${i}`, "Jordan", `msg ${i}`, `${1000 + i}`, 1, 0, null, now - 1000, now - i]
+      );
+    }
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/projects`);
+    const body = await res.json() as any;
+    expect(body.unlinked_mentions_open).toBe(25);
+    expect(body.unlinked_mentions_open_items.length).toBe(20);
+    srv.stop();
+  });
 });
 
 // ── projectDetail ──────────────────────────────────────────────────────────
