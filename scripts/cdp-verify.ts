@@ -243,7 +243,7 @@ try {
     ],
   );
 
-  // Unlinked Slack mention (session_id IS NULL) — for conversations strip assertion
+  // Unlinked Slack mention (session_id IS NULL, resolved=0) — open, for conversations strip assertion
   seedDb.run(
     `INSERT OR IGNORE INTO mentions
        (channel_id, channel_name, thread_ts, author, author_id, text, ts,
@@ -253,6 +253,19 @@ try {
       "C-UNLINKED", "random", "1751999001.000001", "Jordan", "U099",
       "Hey can anyone help with this?", "1751999001.000001",
       1, 0, nowMs - 600_000, nowMs - 600_000, null,
+    ],
+  );
+
+  // Unlinked Slack mention (session_id IS NULL, resolved=1) — resolved, for filter assertion
+  seedDb.run(
+    `INSERT OR IGNORE INTO mentions
+       (channel_id, channel_name, thread_ts, author, author_id, text, ts,
+        ask_count, resolved, first_at, last_at, session_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      "C-UNLINKED2", "general", "1751999002.000001", "Alex", "U100",
+      "This has been answered already.", "1751999002.000001",
+      0, 1, nowMs - 500_000, nowMs - 500_000, null,
     ],
   );
 
@@ -487,10 +500,18 @@ try {
   await sleep(1200);
   const jConvViewHidden = await evaluate(cdp, "document.getElementById('conversations-view').hidden");
   if (jConvViewHidden) fail("(j): #conversations-view still hidden after chip click");
-  // The seeded unlinked mention author "Jordan" should appear in the view
+  // Default filter = open: Jordan (resolved=0) should appear, Alex (resolved=1) should NOT
   const jConvText = await evaluate(cdp, "(document.getElementById('conversations-view')?.textContent || '').toLowerCase()");
-  if (!jConvText.includes("jordan")) fail(`(j): 'jordan' not found in conversations-view. Got: "${jConvText.slice(0, 200)}"`);
-  console.log("✓ (j): conversations chip → view with seeded unlinked mention, hero includes unlinked count");
+  if (!jConvText.includes("jordan")) fail(`(j): 'jordan' not found in conversations-view (open filter). Got: "${jConvText.slice(0, 200)}"`);
+  if (jConvText.includes("alex")) fail(`(j): 'alex' (resolved) appeared in conversations-view with open filter — should be hidden. Got: "${jConvText.slice(0, 200)}"`);
+  console.log("✓ (j): default open filter shows open mention (Jordan), hides resolved mention (Alex)");
+  // Click "Todas" filter chip → both mentions visible
+  await evaluate(cdp, "(() => { var chips = document.querySelectorAll('#conversations-view [data-conv-filter]'); chips.forEach(function(c){ if(c.dataset.convFilter==='all') c.click(); }); })()");
+  await sleep(400);
+  const jAllText = await evaluate(cdp, "(document.getElementById('conversations-view')?.textContent || '').toLowerCase()");
+  if (!jAllText.includes("jordan")) fail(`(j): 'jordan' not found in conversations-view after switching to Todas. Got: "${jAllText.slice(0, 200)}"`);
+  if (!jAllText.includes("alex")) fail(`(j): 'alex' not found in conversations-view after switching to Todas. Got: "${jAllText.slice(0, 200)}"`);
+  console.log("✓ (j): conversations chip → view with seeded unlinked mention, hero includes unlinked count, filter works");
 
   // Screenshot ──────────────────────────────────────────────────────────
   const screenshotResult = await cdp.send<any>("Page.captureScreenshot", { format: "png" });
