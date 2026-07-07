@@ -1,7 +1,10 @@
 import { test, expect } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { mkdtempSync, mkdirSync, copyFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { openDb } from "../src/db";
-import { buildDailyDigest, generateDaily, dateKey } from "../src/daily";
+import { buildDailyDigest, generateDaily, dateKey, scanRecentTranscripts } from "../src/daily";
 import type { LlmRunner } from "../src/summarizer";
 import type { Config } from "../src/config";
 
@@ -132,13 +135,13 @@ test("buildDailyDigest excludes worker sessions", () => {
   expect(digest).toContain("real-session");
 });
 
-test("buildDailyDigest caps at 12000 chars", () => {
+test("buildDailyDigest caps at 16000 chars", () => {
   const db = openDb(":memory:");
   for (let i = 0; i < 20; i++) {
     insertSession(db, { id: `s${i}`, name: `session-${i}`, summary: "x".repeat(500), last_activity: NOW });
   }
   const digest = buildDailyDigest(db, NOW);
-  expect(digest.length).toBeLessThanOrEqual(12000);
+  expect(digest.length).toBeLessThanOrEqual(16000);
 });
 
 test("buildDailyDigest includes active sessions from full 24h window, not just since midnight", () => {
@@ -411,4 +414,130 @@ test("generateDaily prompt contains initiative-subject and omit-filler rules", a
   expect(capturedPrompt).toContain("OMIT");
   // bad filler example
   expect(capturedPrompt).toContain("awaiting user direction");
+});
+
+// --- scanRecentTranscripts ---
+
+test("scanRecentTranscripts finds jsonl files modified within the window", () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), "cl-test-scan-"));
+  const projectDir = join(tmpDir, "projects", "my-project");
+  mkdirSync(projectDir, { recursive: true });
+  const fixtureSrc = new URL("fixtures/transcript/sample.jsonl", import.meta.url).pathname;
+  const destPath = join(projectDir, "abc123.jsonl");
+  copyFileSync(fixtureSrc, destPath);
+
+  // since = 0 means all files qualify
+  const results = scanRecentTranscripts([tmpDir], 0);
+  expect(results.length).toBeGreaterThanOrEqual(1);
+  const found = results.find(r => r.sessionId === "abc123");
+  expect(found).toBeDefined();
+  expect(found!.project).toBe("my-project");
+  expect(found!.path).toBe(destPath);
+});
+
+test("scanRecentTranscripts excludes files older than since", () => {
+  const tmpDir = mkdtempSync(join(tmpdir(), "cl-test-scan-"));
+  const projectDir = join(tmpDir, "projects", "old-project");
+  mkdirSync(projectDir, { recursive: true });
+  const fixtureSrc = new URL("fixtures/transcript/sample.jsonl", import.meta.url).pathname;
+  copyFileSync(fixtureSrc, join(projectDir, "oldsession.jsonl"));
+
+  // since = far future means file is too old
+  const results = scanRecentTranscripts([tmpDir], Date.now() + 1_000_000);
+  expect(results.find(r => r.sessionId === "oldsession")).toBeUndefined();
+});
+
+test("scanRecentTranscripts tolerates missing dirs gracefully", () => {
+  const results = scanRecentTranscripts(["/nonexistent/dir/that/does/not/exist"], 0);
+  expect(results).toEqual([]);
+});
+
+// --- disk-scan integration in buildDailyDigest ---
+
+test("buildDailyDigest includes untracked disk transcript content", () => {
+  const db = openDb(":memory:");
+  const tmpDir = mkdtempSync(join(tmpdir(), "cl-test-digest-"));
+  const projectDir = join(tmpDir, "projects", "disk-project");
+  mkdirSync(projectDir, { recursive: true });
+  const fixtureSrc = new URL("fixtures/transcript/sample.jsonl", import.meta.url).pathname;
+  copyFileSync(fixtureSrc, join(projectDir, "untracked-session.jsonl"));
+
+  // No DB sessions inserted — digest should still include disk transcript
+  const digest = buildDailyDigest(db, Date.now(), [tmpDir]);
+  expect(digest).toContain("Please refactor the auth module");
+  expect(digest).toContain("disk-project");
+});
+
+test("buildDailyDigest dedupes session already in DB from disk scan", () => {
+  const db = openDb(":memory:");
+  const tmpDir = mkdtempSync(join(tmpdir(), "cl-test-digest-dedup-"));
+  const projectDir = join(tmpDir, "projects", "my-project");
+  mkdirSync(projectDir, { recursive: true });
+  const fixtureSrc = new URL("fixtures/transcript/sample.jsonl", import.meta.url).pathname;
+  const trackedSessionId = "tracked-session-id";
+  copyFileSync(fixtureSrc, join(projectDir, `${trackedSessionId}.jsonl`));
+
+  // Insert the same sessionId into DB
+  insertSession(db, { id: trackedSessionId, name: "tracked", summary: "db summary", last_activity: Date.now() });
+
+  const digest = buildDailyDigest(db, Date.now(), [tmpDir]);
+  // The disk transcript should NOT produce a duplicate "(untracked)" block for this session
+  expect(digest).not.toContain("(untracked)");
+  // The DB-tracked session should still appear
+  expect(digest).toContain("tracked");
+});
+
+// --- Slack conversations section ---
+
+test("buildDailyDigest includes conversations section when recent mentions exist", () => {
+  const db = openDb(":memory:");
+  db.run(
+    `INSERT INTO mentions (channel_id, channel_name, thread_ts, author, text, resolved, ask_count, last_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ["C123", "general", "111.222", "alice", "Can you check the metrics?", 0, 1, NOW]
+  );
+  insertSession(db, { id: "s1", summary: "some work", last_activity: NOW });
+  const digest = buildDailyDigest(db, NOW);
+  expect(digest).toContain("=== Conversations (Slack) ===");
+  expect(digest).toContain("alice");
+  expect(digest).toContain("general");
+  expect(digest).toContain("Can you check the metrics?");
+});
+
+test("buildDailyDigest omits conversations section when no recent mentions", () => {
+  const db = openDb(":memory:");
+  insertSession(db, { id: "s1", summary: "some work", last_activity: NOW });
+  const digest = buildDailyDigest(db, NOW);
+  expect(digest).not.toContain("=== Conversations (Slack) ===");
+});
+
+test("buildDailyDigest omits conversations older than 24h", () => {
+  const db = openDb(":memory:");
+  db.run(
+    `INSERT INTO mentions (channel_id, channel_name, thread_ts, author, text, resolved, ask_count, last_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ["C123", "general", "111.222", "bob", "old question", 0, 1, NOW_24H_AGO - 1]
+  );
+  insertSession(db, { id: "s1", summary: "some work", last_activity: NOW });
+  const digest = buildDailyDigest(db, NOW);
+  expect(digest).not.toContain("=== Conversations (Slack) ===");
+  expect(digest).not.toContain("old question");
+});
+
+// --- outcome-over-mechanism in prompt ---
+
+test("generateDaily prompt contains outcome-over-mechanism markers (watchdog BAD, Grafana GOOD)", async () => {
+  const db = openDb(":memory:");
+  let capturedPrompt = "";
+  const trackRunner: LlmRunner = async (prompt) => {
+    capturedPrompt = prompt;
+    return CANNED_DAILY;
+  };
+  await generateDaily(db, trackRunner, "es", NOW);
+  // BAD example must mention watchdog (the mechanism)
+  expect(capturedPrompt).toContain("watchdog");
+  // GOOD example must mention Grafana (the domain outcome)
+  expect(capturedPrompt).toContain("Grafana");
+  // Rule header
+  expect(capturedPrompt).toContain("OUTCOME OVER MECHANISM");
 });
