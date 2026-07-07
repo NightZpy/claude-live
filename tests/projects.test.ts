@@ -287,6 +287,24 @@ describe("GET /api/projects", () => {
     expect(typeof p.prs_open).toBe("number");
     srv.stop();
   });
+
+  test("unlinked_mentions_open counts beyond the 20-item dropdown cap", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    for (let i = 0; i < 25; i++) {
+      db.run(
+        `INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved, session_id, first_at, last_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        ["C1", `t${i}`, "Jordan", `msg ${i}`, `${1000 + i}`, 1, 0, null, now - 1000, now - i]
+      );
+    }
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/projects`);
+    const body = await res.json() as any;
+    expect(body.unlinked_mentions_open).toBe(25);
+    expect(body.unlinked_mentions_open_items.length).toBe(20);
+    srv.stop();
+  });
 });
 
 // ── projectDetail ──────────────────────────────────────────────────────────
@@ -434,6 +452,258 @@ describe("GET /api/projects/:key/detail", () => {
     expect(res.status).toBe(200);
     const body = await res.json() as any;
     expect(body.sessions.length).toBe(1);
+    srv.stop();
+  });
+});
+
+// ── GET /api/conversations ─────────────────────────────────────────────────
+
+describe("GET /api/conversations", () => {
+  test("returns conversations array with correct shape", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+
+    // unlinked mention (session_id IS NULL)
+    db.run(
+      `INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, resolved_manual, text, first_at, last_at)
+       VALUES ('C1','t1','jordan',NULL,0,NULL,'ping from jordan',?,?)`,
+      [now - 2000, now - 1000]
+    );
+
+    // linked mention (session_id set)
+    db.run(
+      `INSERT INTO sessions (id, instance, status, cwd, git_repo, kind, started_at, last_activity)
+       VALUES ('s1','main','running','/w/acme','org/acme','session',?,?)`,
+      [now - 5000, now]
+    );
+    db.run(
+      `INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, resolved_manual, text, first_at, last_at)
+       VALUES ('C2','t2','alex','s1',0,NULL,'linked mention',?,?)`,
+      [now - 3000, now - 500]
+    );
+
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/conversations`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(Array.isArray(body.conversations)).toBe(true);
+    expect(body.conversations.length).toBe(2);
+
+    const first = body.conversations[0]; // last_at DESC → linked mention (now-500) first
+    expect(typeof first.id).toBe("number");
+    expect(typeof first.author).toBe("string");
+    expect(typeof first.channel_id).toBe("string");
+    expect(typeof first.resolved_eff).toBe("number");
+    expect("session_id" in first).toBe(true);
+    expect("project_key" in first).toBe(true);
+    expect("first_at" in first).toBe(true);
+    expect("last_at" in first).toBe(true);
+
+    // linked mention → project_key = "acme" (derived from git_repo "org/acme")
+    const linked = body.conversations.find((c: any) => c.author === "alex");
+    expect(linked.project_key).toBe("acme");
+
+    // unlinked mention → project_key = null, session_id = null
+    const unlinked = body.conversations.find((c: any) => c.author === "jordan");
+    expect(unlinked.project_key).toBeNull();
+    expect(unlinked.session_id).toBeNull();
+
+    srv.stop();
+  });
+
+  test("resolved_eff is 1 when resolved=1 or resolved_manual=1, else 0", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+
+    db.run(
+      `INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, resolved_manual, first_at, last_at)
+       VALUES ('C1','t1','alice',NULL,1,NULL,?,?)`,
+      [now - 3000, now - 3000]
+    );
+    db.run(
+      `INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, resolved_manual, first_at, last_at)
+       VALUES ('C1','t2','bob',NULL,0,1,?,?)`,
+      [now - 2000, now - 2000]
+    );
+    db.run(
+      `INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, resolved_manual, first_at, last_at)
+       VALUES ('C1','t3','charlie',NULL,0,NULL,?,?)`,
+      [now - 1000, now - 1000]
+    );
+
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/conversations`);
+    const body = await res.json() as any;
+
+    const alice = body.conversations.find((c: any) => c.author === "alice");
+    expect(alice.resolved_eff).toBe(1);
+
+    const bob = body.conversations.find((c: any) => c.author === "bob");
+    expect(bob.resolved_eff).toBe(1);
+
+    const charlie = body.conversations.find((c: any) => c.author === "charlie");
+    expect(charlie.resolved_eff).toBe(0);
+
+    srv.stop();
+  });
+
+  test("capped at 50 results ordered by last_at DESC", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    for (let i = 0; i < 55; i++) {
+      db.run(
+        `INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, first_at, last_at)
+         VALUES ('C1',?,?,NULL,0,?,?)`,
+        [`t${i}`, `user${i}`, now - i * 1000, now - i * 1000]
+      );
+    }
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/conversations`);
+    const body = await res.json() as any;
+    expect(body.conversations.length).toBe(50);
+    // first should have highest last_at (smallest i = 0)
+    expect(body.conversations[0].author).toBe("user0");
+    srv.stop();
+  });
+});
+
+// ── GET /api/projects unlinked_mentions_open ───────────────────────────────
+
+describe("GET /api/projects unlinked_mentions_open", () => {
+  test("includes unlinked_mentions_open count and items in response", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+
+    db.run(
+      `INSERT INTO sessions (id, instance, status, cwd, kind, started_at, last_activity)
+       VALUES ('s1','main','running','/w/acme','session',?,?)`,
+      [now - 5000, now]
+    );
+
+    // unlinked open mention
+    db.run(
+      `INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, resolved_manual, text, first_at, last_at)
+       VALUES ('C1','t1','jordan',NULL,0,NULL,'hello',?,?)`,
+      [now - 2000, now - 1000]
+    );
+
+    // unlinked resolved mention — should NOT count
+    db.run(
+      `INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, resolved_manual, text, first_at, last_at)
+       VALUES ('C1','t2','alex',NULL,1,NULL,'done',?,?)`,
+      [now - 3000, now - 2000]
+    );
+
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/projects`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(typeof body.unlinked_mentions_open).toBe("number");
+    expect(body.unlinked_mentions_open).toBe(1);
+    expect(Array.isArray(body.unlinked_mentions_open_items)).toBe(true);
+    expect(body.unlinked_mentions_open_items.length).toBe(1);
+    expect(body.unlinked_mentions_open_items[0].author).toBe("jordan");
+    expect(body.unlinked_mentions_open_items[0].text).toBe("hello");
+    srv.stop();
+  });
+
+  test("unlinked_mentions_open is 0 when all unlinked are resolved", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    db.run(
+      `INSERT INTO sessions (id, instance, status, cwd, kind, started_at, last_activity)
+       VALUES ('s1','main','running','/w/proj','session',?,?)`,
+      [now - 5000, now]
+    );
+    db.run(
+      `INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, resolved_manual, first_at, last_at)
+       VALUES ('C1','t1','bob',NULL,1,NULL,?,?)`,
+      [now - 1000, now - 500]
+    );
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/projects`);
+    const body = await res.json() as any;
+    expect(body.unlinked_mentions_open).toBe(0);
+    expect(body.unlinked_mentions_open_items).toEqual([]);
+    srv.stop();
+  });
+});
+
+// ── POST /api/mentions/:id/resolve (resolve endpoint) ─────────────────────
+
+describe("POST /api/mentions/:id/resolve", () => {
+  test("toggles resolved_manual and affects resolved_eff in conversations", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+
+    db.run(
+      `INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, resolved_manual, first_at, last_at)
+       VALUES ('C1','t1','jordan',NULL,0,NULL,?,?)`,
+      [now - 1000, now - 500]
+    );
+    const mention = db.query("SELECT id FROM mentions WHERE author = 'jordan'").get() as any;
+    const mentionId = mention.id;
+
+    const srv = createServer(db, { port: 0 });
+
+    // Resolve
+    const r1 = await fetch(`http://127.0.0.1:${srv.port}/api/mentions/${mentionId}/resolve`, { method: "POST" });
+    expect(r1.status).toBe(200);
+    const d1 = await r1.json() as any;
+    expect(d1.resolved_manual).toBe(1);
+
+    // Confirm resolved_eff in /api/conversations
+    const convRes1 = await fetch(`http://127.0.0.1:${srv.port}/api/conversations`);
+    const convBody1 = await convRes1.json() as any;
+    const conv1 = convBody1.conversations.find((c: any) => c.id === mentionId);
+    expect(conv1.resolved_eff).toBe(1);
+
+    // Toggle back (unresolve)
+    const r2 = await fetch(`http://127.0.0.1:${srv.port}/api/mentions/${mentionId}/resolve`, { method: "POST" });
+    expect(r2.status).toBe(200);
+    const d2 = await r2.json() as any;
+    expect(d2.resolved_manual).toBeNull();
+
+    // Confirm resolved_eff in /api/conversations is back to 0
+    const convRes2 = await fetch(`http://127.0.0.1:${srv.port}/api/conversations`);
+    const convBody2 = await convRes2.json() as any;
+    const conv2 = convBody2.conversations.find((c: any) => c.id === mentionId);
+    expect(conv2.resolved_eff).toBe(0);
+
+    srv.stop();
+  });
+
+  test("unlinked_mentions_open decrements after resolving unlinked mention", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+
+    db.run(
+      `INSERT INTO sessions (id, instance, status, cwd, kind, started_at, last_activity)
+       VALUES ('s1','main','running','/w/proj','session',?,?)`,
+      [now - 5000, now]
+    );
+    db.run(
+      `INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, resolved_manual, text, first_at, last_at)
+       VALUES ('C1','t1','jordan',NULL,0,NULL,'hello',?,?)`,
+      [now - 1000, now - 500]
+    );
+    const m = db.query("SELECT id FROM mentions WHERE author = 'jordan'").get() as any;
+
+    const srv = createServer(db, { port: 0 });
+
+    // Before resolve
+    const r0 = await fetch(`http://127.0.0.1:${srv.port}/api/projects`);
+    const b0 = await r0.json() as any;
+    expect(b0.unlinked_mentions_open).toBe(1);
+
+    // Resolve
+    await fetch(`http://127.0.0.1:${srv.port}/api/mentions/${m.id}/resolve`, { method: "POST" });
+
+    // After resolve
+    const r1 = await fetch(`http://127.0.0.1:${srv.port}/api/projects`);
+    const b1 = await r1.json() as any;
+    expect(b1.unlinked_mentions_open).toBe(0);
+
     srv.stop();
   });
 });
