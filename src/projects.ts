@@ -1,6 +1,13 @@
 import type { Database } from "bun:sqlite";
 import { basename } from "node:path";
 
+export type ProjectDetail = {
+  sessions: (SessionRow & { file_count: number; mentions_open: number })[];
+  tasks: any[];
+  mentions: any[];
+  prs: any[];
+};
+
 export type SessionRow = {
   id: string;
   git_repo: string | null;
@@ -192,4 +199,62 @@ export function listProjects(db: Database, now: number): ProjectSummary[] {
   });
 
   return result;
+}
+
+/** Returns sessions, tasks, mentions, and PR links for a single project key. */
+export function projectDetail(db: Database, key: string): ProjectDetail | null {
+  type DetailRow = SessionRow & { file_count: number; mentions_open: number };
+
+  const allRows = db.query(`
+    SELECT s.*,
+      COALESCE((SELECT COUNT(*) FROM session_files f WHERE f.session_id = s.id), 0) AS file_count,
+      COALESCE((SELECT COUNT(*) FROM mentions m
+        WHERE m.session_id = s.id
+          AND m.resolved = 0
+          AND (m.resolved_manual IS NULL OR m.resolved_manual = 0)), 0) AS mentions_open
+    FROM sessions s
+    WHERE s.kind IS NULL OR s.kind != 'worker'
+    ORDER BY CASE s.status
+      WHEN 'waiting_input' THEN 0
+      WHEN 'running' THEN 1
+      WHEN 'idle' THEN 2
+      ELSE 3
+    END, s.last_activity DESC
+  `).all() as DetailRow[];
+
+  const sessions = allRows.filter(s => projectKeyForSession(s) === key);
+  if (sessions.length === 0) return null;
+
+  const nonArchivedIds = sessions
+    .filter(s => s.status !== "archived")
+    .map(s => s.id);
+
+  if (nonArchivedIds.length === 0) {
+    return { sessions, tasks: [], mentions: [], prs: [] };
+  }
+
+  const ph = nonArchivedIds.map(() => "?").join(",");
+
+  const tasks = db.query(
+    `SELECT * FROM tasks WHERE session_id IN (${ph})
+     ORDER BY CASE status
+       WHEN 'blocked' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'open' THEN 2
+       ELSE 3 END, opened_at DESC`
+  ).all(...nonArchivedIds);
+
+  const mentions = db.query(
+    `SELECT * FROM mentions
+     WHERE session_id IN (${ph})
+       AND resolved = 0
+       AND (resolved_manual IS NULL OR resolved_manual = 0)
+     ORDER BY last_at DESC`
+  ).all(...nonArchivedIds);
+
+  const prs = db.query(
+    `SELECT ref, title, meta, url FROM links
+     WHERE kind = 'pr' AND session_id IN (${ph})
+     GROUP BY ref`
+  ).all(...nonArchivedIds);
+
+  return { sessions, tasks, mentions, prs };
 }

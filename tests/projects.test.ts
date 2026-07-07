@@ -1,6 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { openDb } from "../src/db";
-import { projectKeyForSession, listProjects } from "../src/projects";
+import { projectKeyForSession, listProjects, projectDetail } from "../src/projects";
 import { createServer } from "../src/server";
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -285,6 +285,155 @@ describe("GET /api/projects", () => {
     expect(typeof p.blocked_tasks).toBe("number");
     expect(typeof p.mentions_open).toBe("number");
     expect(typeof p.prs_open).toBe("number");
+    srv.stop();
+  });
+});
+
+// ── projectDetail ──────────────────────────────────────────────────────────
+
+describe("projectDetail", () => {
+  function makeDb() { return openDb(":memory:"); }
+
+  test("returns null for unknown key", () => {
+    const db = makeDb();
+    expect(projectDetail(db, "unknown")).toBeNull();
+  });
+
+  test("returns sessions, tasks, mentions, prs for a project", () => {
+    const db = makeDb();
+    const now = Date.now();
+    db.run(
+      `INSERT INTO sessions (id, instance, status, cwd, git_repo, kind, started_at, last_activity)
+       VALUES ('s1','main','running','/w/myproj','org/myproj','session',?,?)`,
+      [now - 5000, now]
+    );
+    db.run("INSERT INTO tasks (session_id, title, status, opened_at) VALUES ('s1','Fix bug','open',?)", [now]);
+    db.run("INSERT INTO tasks (session_id, title, status, opened_at, closed_at) VALUES ('s1','Old task','done',?,?)", [now - 1000, now - 500]);
+    db.run(
+      "INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, first_at, last_at) VALUES ('C1','1','alice','s1',0,?,?)",
+      [now - 1000, now]
+    );
+    db.run("INSERT INTO links (session_id, kind, ref) VALUES ('s1','pr','myproj#1')", []);
+    db.run("INSERT INTO links (session_id, kind, ref) VALUES ('s1','linear','MP-10')", []); // not a PR
+
+    const detail = projectDetail(db, "myproj");
+    expect(detail).not.toBeNull();
+    expect(detail!.sessions.length).toBe(1);
+    expect(detail!.tasks.length).toBe(2);       // all tasks (open + done)
+    expect(detail!.mentions.length).toBe(1);
+    expect(detail!.prs.length).toBe(1);          // only PR links, not linear
+  });
+
+  test("excludes resolved mentions", () => {
+    const db = makeDb();
+    const now = Date.now();
+    db.run(
+      `INSERT INTO sessions (id, instance, status, cwd, kind, started_at, last_activity)
+       VALUES ('s1','main','running','/w/proj','session',?,?)`,
+      [now - 5000, now]
+    );
+    db.run(
+      "INSERT INTO mentions (channel_id, thread_ts, author, session_id, resolved, first_at, last_at) VALUES ('C1','1','alice','s1',1,?,?)",
+      [now - 1000, now]
+    );
+    const detail = projectDetail(db, "proj");
+    expect(detail!.mentions.length).toBe(0);
+  });
+
+  test("excludes worker sessions", () => {
+    const db = makeDb();
+    const now = Date.now();
+    db.run(
+      `INSERT INTO sessions (id, instance, status, cwd, kind, started_at, last_activity)
+       VALUES ('w1','main','running','/w/proj','worker',?,?)`,
+      [now - 5000, now]
+    );
+    expect(projectDetail(db, "proj")).toBeNull();
+  });
+
+  test("returns sessions sorted active-first", () => {
+    const db = makeDb();
+    const now = Date.now();
+    db.run(
+      `INSERT INTO sessions (id, instance, status, cwd, kind, started_at, last_activity, ended_at)
+       VALUES ('arch','main','archived','/w/proj','session',?,?,?)`,
+      [now - 10000, now - 5000, now - 1000]
+    );
+    db.run(
+      `INSERT INTO sessions (id, instance, status, cwd, kind, started_at, last_activity)
+       VALUES ('active','main','running','/w/proj','session',?,?)`,
+      [now - 5000, now]
+    );
+    const detail = projectDetail(db, "proj");
+    expect(detail!.sessions[0].id).toBe("active");
+    expect(detail!.sessions[1].id).toBe("arch");
+  });
+
+  test("handles URL-encoded key for (sin proyecto)", () => {
+    const db = makeDb();
+    const now = Date.now();
+    db.run(
+      `INSERT INTO sessions (id, instance, status, cwd, git_repo, kind, started_at, last_activity)
+       VALUES ('s1','main','running',NULL,NULL,'session',?,?)`,
+      [now - 5000, now]
+    );
+    const detail = projectDetail(db, "(sin proyecto)");
+    expect(detail).not.toBeNull();
+    expect(detail!.sessions.length).toBe(1);
+  });
+});
+
+// ── GET /api/projects/:key/detail ─────────────────────────────────────────
+
+describe("GET /api/projects/:key/detail", () => {
+  test("returns 404 for unknown key", async () => {
+    const db = openDb(":memory:");
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/projects/unknown/detail`);
+    expect(res.status).toBe(404);
+    srv.stop();
+  });
+
+  test("returns detail for known key", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    db.run(
+      `INSERT INTO sessions (id, instance, status, cwd, git_repo, kind, started_at, last_activity)
+       VALUES ('s1','main','running','/w/beta','org/beta','session',?,?)`,
+      [now - 5000, now]
+    );
+    db.run("INSERT INTO tasks (session_id, title, status, opened_at) VALUES ('s1','Write tests','open',?)", [now]);
+    db.run("INSERT INTO links (session_id, kind, ref) VALUES ('s1','pr','beta#7')", []);
+
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/projects/beta/detail`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(Array.isArray(body.sessions)).toBe(true);
+    expect(Array.isArray(body.tasks)).toBe(true);
+    expect(Array.isArray(body.mentions)).toBe(true);
+    expect(Array.isArray(body.prs)).toBe(true);
+    expect(body.sessions.length).toBe(1);
+    expect(body.tasks.length).toBe(1);
+    expect(body.prs.length).toBe(1);
+    srv.stop();
+  });
+
+  test("URL-encoded key decodes correctly", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    db.run(
+      `INSERT INTO sessions (id, instance, status, cwd, git_repo, kind, started_at, last_activity)
+       VALUES ('s1','main','running',NULL,NULL,'session',?,?)`,
+      [now - 5000, now]
+    );
+    const srv = createServer(db, { port: 0 });
+    const res = await fetch(
+      `http://127.0.0.1:${srv.port}/api/projects/${encodeURIComponent("(sin proyecto)")}/detail`
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.sessions.length).toBe(1);
     srv.stop();
   });
 });
