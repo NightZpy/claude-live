@@ -1,4 +1,6 @@
 import type { Database } from "bun:sqlite";
+import { readdirSync, statSync } from "node:fs";
+import { join, basename } from "node:path";
 import { defaultRunner, type LlmRunner } from "./summarizer";
 import type { Config } from "./config";
 import { runGated } from "./llm-gate";
@@ -22,7 +24,7 @@ export function dateKey(now: number): string {
   return `${y}-${m}-${day}`;
 }
 
-const DIGEST_CAP = 12000;
+const DIGEST_CAP = 16000;
 
 type EnrichedSessionRow = {
   id: string;
@@ -37,6 +39,7 @@ type EnrichedSessionRow = {
 };
 type TaskEnrichedRow = { session_id: string; title: string; status: string; blocked_on: string | null; closed_at: number | null };
 type LinkRow = { session_id: string; kind: string; ref: string; title: string | null };
+type ConvRow = { author: string; channel_name: string | null; text: string | null; resolved: number; ask_count: number };
 
 function projectNameFromSession(s: Pick<EnrichedSessionRow, "git_repo" | "cwd">): string {
   if (s.git_repo) {
@@ -50,7 +53,56 @@ function projectNameFromSession(s: Pick<EnrichedSessionRow, "git_repo" | "cwd">)
   return "(unknown)";
 }
 
-export function buildDailyDigest(db: Database, now: number): string {
+export function scanRecentTranscripts(
+  instanceDirs: string[],
+  since: number
+): { sessionId: string; path: string; mtime: number; project: string }[] {
+  const results: { sessionId: string; path: string; mtime: number; project: string }[] = [];
+  for (const dir of instanceDirs) {
+    const projectsDir = join(dir, "projects");
+    let projectEntries: string[];
+    try {
+      projectEntries = readdirSync(projectsDir);
+    } catch {
+      continue;
+    }
+    for (const projectEntry of projectEntries) {
+      const projectPath = join(projectsDir, projectEntry);
+      try {
+        if (!statSync(projectPath).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      let files: string[];
+      try {
+        files = readdirSync(projectPath);
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        if (!file.endsWith(".jsonl")) continue;
+        const filePath = join(projectPath, file);
+        let fileStat: ReturnType<typeof statSync>;
+        try {
+          fileStat = statSync(filePath);
+        } catch {
+          continue;
+        }
+        if (fileStat.mtimeMs >= since) {
+          results.push({
+            sessionId: basename(file, ".jsonl"),
+            path: filePath,
+            mtime: fileStat.mtimeMs,
+            project: projectEntry,
+          });
+        }
+      }
+    }
+  }
+  return results;
+}
+
+export function buildDailyDigest(db: Database, now: number, instanceDirs: string[] = []): string {
   const since24h = now - 86_400_000;
 
   const sessions = db.query(
@@ -61,24 +113,36 @@ export function buildDailyDigest(db: Database, now: number): string {
      ORDER BY last_activity DESC LIMIT 30`
   ).all(since24h) as EnrichedSessionRow[];
 
-  if (sessions.length === 0) return "";
+  const trackedIds = new Set(sessions.map(s => s.id));
 
-  const sessionIds = sessions.map(s => s.id);
-  const ph = sessionIds.map(() => "?").join(",");
+  const diskTranscripts = scanRecentTranscripts(instanceDirs, since24h)
+    .filter(t => !trackedIds.has(t.sessionId));
 
-  const tasks = db.query(
-    `SELECT session_id, title, status, blocked_on, closed_at
-     FROM tasks
-     WHERE session_id IN (${ph})
-       AND (status IN ('open', 'blocked') OR (status = 'done' AND closed_at >= ?))
-     ORDER BY status, opened_at ASC`
-  ).all(...sessionIds, since24h) as TaskEnrichedRow[];
+  const convRows = db.query(
+    `SELECT author, channel_name, text, resolved, ask_count FROM mentions WHERE last_at >= ? ORDER BY last_at DESC LIMIT 20`
+  ).all(since24h) as ConvRow[];
 
-  const links = db.query(
-    `SELECT session_id, kind, ref, title
-     FROM links
-     WHERE session_id IN (${ph}) AND kind IN ('pr', 'linear')`
-  ).all(...sessionIds) as LinkRow[];
+  if (sessions.length === 0 && diskTranscripts.length === 0 && convRows.length === 0) return "";
+
+  let tasks: TaskEnrichedRow[] = [];
+  let links: LinkRow[] = [];
+
+  if (sessions.length > 0) {
+    const sessionIds = sessions.map(s => s.id);
+    const ph = sessionIds.map(() => "?").join(",");
+    tasks = db.query(
+      `SELECT session_id, title, status, blocked_on, closed_at
+       FROM tasks
+       WHERE session_id IN (${ph})
+         AND (status IN ('open', 'blocked') OR (status = 'done' AND closed_at >= ?))
+       ORDER BY status, opened_at ASC`
+    ).all(...sessionIds, since24h) as TaskEnrichedRow[];
+    links = db.query(
+      `SELECT session_id, kind, ref, title
+       FROM links
+       WHERE session_id IN (${ph}) AND kind IN ('pr', 'linear')`
+    ).all(...sessionIds) as LinkRow[];
+  }
 
   // Group sessions by project name
   const projectSessions = new Map<string, EnrichedSessionRow[]>();
@@ -100,7 +164,7 @@ export function buildDailyDigest(db: Database, now: number): string {
     linksBySession.get(l.session_id)!.push(l);
   }
 
-  // Build per-project blocks
+  // Build per-project blocks from DB sessions
   const projectBlocks: string[] = [];
   for (const [key, pSessions] of projectSessions) {
     const lines: string[] = [`=== Project: ${key} ===`];
@@ -135,12 +199,41 @@ export function buildDailyDigest(db: Database, now: number): string {
     projectBlocks.push(lines.join("\n"));
   }
 
-  // Trim per-project evenly to stay within cap
-  const raw = projectBlocks.join("\n\n");
+  // Add disk-scanned untracked transcripts grouped by project
+  const diskByProject = new Map<string, { sessionId: string; path: string }[]>();
+  for (const t of diskTranscripts) {
+    if (!diskByProject.has(t.project)) diskByProject.set(t.project, []);
+    diskByProject.get(t.project)!.push({ sessionId: t.sessionId, path: t.path });
+  }
+  for (const [proj, entries] of diskByProject) {
+    const lines: string[] = [`=== Project: ${proj} (disk) ===`];
+    for (const entry of entries) {
+      lines.push(`[${entry.sessionId}] (untracked)`);
+      const excerpt = readDigest(entry.path, 1200);
+      if (excerpt) lines.push(excerpt.split("\n").map(l => `  ${l}`).join("\n"));
+    }
+    projectBlocks.push(lines.join("\n"));
+  }
+
+  // Build conversations section
+  const allBlocks = [...projectBlocks];
+  if (convRows.length > 0) {
+    const convLines: string[] = [`=== Conversations (Slack) ===`];
+    for (const c of convRows) {
+      const text = (c.text ?? "").slice(0, 200);
+      const resolvedStr = c.resolved ? "resolved" : "open";
+      const chan = c.channel_name ?? "?";
+      convLines.push(`  - ${c.author} in #${chan}: "${text}" [${resolvedStr}, asks:${c.ask_count}]`);
+    }
+    allBlocks.push(convLines.join("\n"));
+  }
+
+  // Trim per-block evenly to stay within cap
+  const raw = allBlocks.join("\n\n");
   if (raw.length <= DIGEST_CAP) return raw;
 
-  const total = projectBlocks.reduce((s, b) => s + b.length, 0);
-  const trimmed = projectBlocks.map(block => {
+  const total = allBlocks.reduce((s, b) => s + b.length, 0);
+  const trimmed = allBlocks.map(block => {
     const limit = Math.floor(DIGEST_CAP * (block.length / total));
     return block.slice(0, limit);
   });
@@ -163,12 +256,18 @@ BULLET REQUIREMENTS (STRICT):
 5. Order bullets by significance — most important work first.
 6. When the digest includes PR numbers, issue refs (e.g. AG-123), include them as supporting detail in the bullet.
 7. FORBIDDEN: bare counts ("30 modifications", "3 sessions"), context-free nouns ("Artifact published", "Analysis done"), folder names as subjects ("acme:", "backend-svc:"), or filler phrases ("awaiting user direction", "session initiated without defined task").
+8. OUTCOME OVER MECHANISM: Describe the DOMAIN OUTCOME — what was created, changed, or verified in product/business terms. NEVER describe the internal tooling, scripts, or model names used to produce it. Internal tool names (watchdog, dispatcher, runner) may only appear when the deliverable itself IS that tool.
+   BAD: "deployed watchdog with Sonnet dispatch for hourly monitoring" — describes internal mechanism, not domain outcome.
+   GOOD: "eval alerts were created in Grafana and monitored through the day to confirm they fire correctly" — describes what was verified in the product.
+   When a fundamental detail materially matters, add ONE sub-bullet: e.g. "  ◦ first real alert fired ~21:00 because a metric dipped below threshold, resolved after re-run".
+9. SLACK CONVERSATIONS: If the digest includes a "=== Conversations (Slack) ===" section with meaningful exchanges, summarize participation as its own bullet(s) — e.g. "answered X's question about Y in #channel — agreed to Z" — under yesterday or today as appropriate. Omit trivial or bot-noise items.
 
 BAD examples (DO NOT produce these):
 - "backend-svc: session initiated without defined task, awaiting user direction" (filler + folder-as-subject)
 - "acme: 30 modifications after parallel analysis" (folder-as-subject + context-free count)
 - "Artifact published"
 - "Continued work on the system"
+- "deployed watchdog with Sonnet dispatch for hourly monitoring" (mechanism, not outcome)
 
 GOOD examples (produce bullets shaped like these):
 - "Eval alerts: wired backend to metrics and created Grafana dashboards; monitored through the day — first real alert detected and resolved"
@@ -208,7 +307,8 @@ export async function generateDaily(
   now: number = Date.now(),
   cfg?: Config,
 ): Promise<DailyRow | null> {
-  const digest = buildDailyDigest(db, now);
+  const instanceDirs = cfg?.instances?.map(i => i.dir) ?? [];
+  const digest = buildDailyDigest(db, now, instanceDirs);
   const date = dateKey(now);
   const nonce = crypto.randomUUID();
   const prompt = buildDailyPrompt(digest, nonce);
