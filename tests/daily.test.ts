@@ -25,11 +25,12 @@ function insertSession(
     summary_next?: string | null;
     archived_reason?: string | null;
     git_repo?: string | null;
+    transcript_path?: string | null;
   }
 ): void {
   db.run(
-    `INSERT INTO sessions (id, instance, status, kind, started_at, last_activity, name, cwd, summary, summary_next, archived_reason, git_repo)
-     VALUES (?, 'test', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO sessions (id, instance, status, kind, started_at, last_activity, name, cwd, summary, summary_next, archived_reason, git_repo, transcript_path)
+     VALUES (?, 'test', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       fields.id,
       fields.status ?? "running",
@@ -41,6 +42,7 @@ function insertSession(
       fields.summary_next ?? null,
       fields.archived_reason ?? null,
       fields.git_repo ?? null,
+      fields.transcript_path ?? null,
     ]
   );
 }
@@ -130,13 +132,13 @@ test("buildDailyDigest excludes worker sessions", () => {
   expect(digest).toContain("real-session");
 });
 
-test("buildDailyDigest caps at 6000 chars", () => {
+test("buildDailyDigest caps at 12000 chars", () => {
   const db = openDb(":memory:");
   for (let i = 0; i < 20; i++) {
     insertSession(db, { id: `s${i}`, name: `session-${i}`, summary: "x".repeat(500), last_activity: NOW });
   }
   const digest = buildDailyDigest(db, NOW);
-  expect(digest.length).toBeLessThanOrEqual(6000);
+  expect(digest.length).toBeLessThanOrEqual(12000);
 });
 
 test("buildDailyDigest excludes active sessions from before today (midnight boundary)", () => {
@@ -378,4 +380,36 @@ test("generateDaily prompt contains good/bad bullet example markers", async () =
   expect(capturedPrompt).toContain("GOOD");
   expect(capturedPrompt).toContain("acme-web");
   expect(capturedPrompt).toContain("30 modifications");
+});
+
+test("buildDailyDigest includes transcript excerpt when transcript_path is set", () => {
+  const db = openDb(":memory:");
+  const transcriptPath = new URL("fixtures/transcript/sample.jsonl", import.meta.url).pathname;
+  insertSession(db, {
+    id: "s1",
+    git_repo: "org/acme-web",
+    summary: "some summary",
+    last_activity: NOW,
+    transcript_path: transcriptPath,
+  });
+  const digest = buildDailyDigest(db, NOW);
+  // sample.jsonl user message "Please refactor the auth module" should appear in excerpt
+  expect(digest).toContain("Please refactor the auth module");
+});
+
+test("generateDaily prompt contains initiative-subject and omit-filler rules", async () => {
+  const db = openDb(":memory:");
+  let capturedPrompt = "";
+  const trackRunner: LlmRunner = async (prompt) => {
+    capturedPrompt = prompt;
+    return CANNED_DAILY;
+  };
+  await generateDaily(db, trackRunner, "es", NOW);
+  // initiative-subject rule markers
+  expect(capturedPrompt).toContain("initiative");
+  expect(capturedPrompt).toContain("directory names");
+  // omit-filler rule marker
+  expect(capturedPrompt).toContain("OMIT");
+  // bad filler example
+  expect(capturedPrompt).toContain("awaiting user direction");
 });
