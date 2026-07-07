@@ -1,6 +1,9 @@
 import type { Database } from "bun:sqlite";
 import { basename } from "node:path";
 
+/** SQL predicate: mention is effectively open (use with table alias or bare column). */
+export const MENTION_OPEN_SQL = `resolved = 0 AND (resolved_manual IS NULL OR resolved_manual = 0)`;
+
 export type ProjectDetail = {
   sessions: (SessionRow & { file_count: number; mentions_open: number })[];
   tasks: any[];
@@ -257,4 +260,66 @@ export function projectDetail(db: Database, key: string): ProjectDetail | null {
   ).all(...nonArchivedIds);
 
   return { sessions, tasks, mentions, prs };
+}
+
+export type ConversationRow = {
+  id: number;
+  author: string;
+  channel_id: string;
+  thread_ts: string;
+  text: string | null;
+  ts: string | null;
+  ask_count: number;
+  resolved_eff: number;
+  session_id: string | null;
+  project_key: string | null;
+  first_at: number | null;
+  last_at: number | null;
+};
+
+/** Returns all mentions (cap 50) ordered by last_at DESC with effective-resolved flag and project key. */
+export function listConversations(db: Database): ConversationRow[] {
+  type RawRow = {
+    id: number;
+    author: string;
+    channel_id: string;
+    thread_ts: string;
+    text: string | null;
+    ts: string | null;
+    ask_count: number;
+    resolved_eff: number;
+    session_id: string | null;
+    first_at: number | null;
+    last_at: number | null;
+    git_repo: string | null;
+    cwd: string | null;
+  };
+
+  const rows = db.query(`
+    SELECT
+      m.id, m.author, m.channel_id, m.thread_ts, m.text, m.ts, m.ask_count,
+      CASE WHEN m.resolved = 1 OR (m.resolved_manual IS NOT NULL AND m.resolved_manual = 1)
+           THEN 1 ELSE 0 END AS resolved_eff,
+      m.session_id, m.first_at, m.last_at,
+      s.git_repo, s.cwd
+    FROM mentions m
+    LEFT JOIN sessions s ON s.id = m.session_id
+    ORDER BY m.last_at DESC
+    LIMIT 50
+  `).all() as RawRow[];
+
+  return rows.map(row => ({
+    id: row.id,
+    author: row.author,
+    channel_id: row.channel_id,
+    thread_ts: row.thread_ts,
+    text: row.text,
+    ts: row.ts,
+    ask_count: row.ask_count,
+    resolved_eff: row.resolved_eff,
+    session_id: row.session_id,
+    project_key: row.session_id ? projectKeyForSession({ git_repo: row.git_repo, cwd: row.cwd }) : null,
+    first_at: row.first_at,
+    last_at: row.last_at,
+  }));
 }

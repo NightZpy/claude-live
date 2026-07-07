@@ -59,6 +59,9 @@ const I18N = {
     proj_mentions_block: "Conversaciones", proj_prs_block: "PRs & Linear",
     proj_empty: "—", proj_expand_loading: "cargando…",
     strip_daily: "📋 Daily", strip_sessions: "Sesiones",
+    strip_conversations: "Conversaciones",
+    conv_open: "abierta", conv_resolved: "respondida",
+    conv_mark_resolved: "marcar respondida", conv_no_project: "sin proyecto",
     usage_chip_paused: "⏸ pausado",
   },
   en: {
@@ -117,6 +120,9 @@ const I18N = {
     proj_mentions_block: "Mentions", proj_prs_block: "PRs & Linear",
     proj_empty: "—", proj_expand_loading: "loading…",
     strip_daily: "📋 Daily", strip_sessions: "Sessions",
+    strip_conversations: "Conversations",
+    conv_open: "open", conv_resolved: "resolved",
+    conv_mark_resolved: "mark resolved", conv_no_project: "no project",
     usage_chip_paused: "⏸ paused",
   },
   pt: {
@@ -175,6 +181,9 @@ const I18N = {
     proj_mentions_block: "Conversas", proj_prs_block: "PRs & Linear",
     proj_empty: "—", proj_expand_loading: "carregando…",
     strip_daily: "📋 Daily", strip_sessions: "Sessões",
+    strip_conversations: "Conversas",
+    conv_open: "aberta", conv_resolved: "respondida",
+    conv_mark_resolved: "marcar respondida", conv_no_project: "sem projeto",
     usage_chip_paused: "⏸ pausado",
   },
 };
@@ -194,6 +203,9 @@ let _lastProjects = [];
 let _lastSessions = { active: [], archived: [] };
 let _lastDailyData = null;
 let _heroDropdownOpen = false;
+let _unlinkedMentionsOpen = 0;
+let _unlinkedMentionsOpenItems = [];
+let _lastConversations = null;  // null = not yet fetched
 
 // ── pure helpers (ported) ─────────────────────────────────────────────────
 function esc(s) {
@@ -398,9 +410,10 @@ function buildEventsFilterRow(presentKinds, activeEvKinds) {
 
 // ── hero counter ──────────────────────────────────────────────────────────
 function computeHeroN(projects) {
-  return projects.reduce(function(sum, p) {
+  var fromProjects = projects.reduce(function(sum, p) {
     return sum + (p.sessions_waiting || 0) + (p.blocked_tasks || 0) + (p.mentions_open || 0);
   }, 0);
+  return fromProjects + _unlinkedMentionsOpen;
 }
 
 function renderHero(projects) {
@@ -430,6 +443,11 @@ function buildHeroDropdownItems(projects) {
       items.push({ proj: p.key, what: "@ " + p.mentions_open + " mención(es)", id: null });
     }
   });
+  // Unlinked open mentions (session_id IS NULL)
+  _unlinkedMentionsOpenItems.forEach(function(m) {
+    var excerpt = (m.text || "").slice(0, 40);
+    items.push({ proj: null, what: "@ " + esc(m.author) + ": " + excerpt, id: null });
+  });
   return items;
 }
 
@@ -440,8 +458,9 @@ function toggleHeroDropdown(projects) {
   const items = buildHeroDropdownItems(projects);
   if (!items.length) return;
   dd.innerHTML = items.map(function(item) {
-    return '<div class="hero-item" data-key="' + esc(item.proj) + '">' +
-      '<span class="hi-proj">' + esc(item.proj) + '</span>' +
+    var projLabel = item.proj != null ? item.proj : (t.conv_no_project || "sin proyecto");
+    return '<div class="hero-item" data-key="' + (item.proj != null ? esc(item.proj) : "") + '" data-unlinked="' + (item.proj == null ? "1" : "0") + '">' +
+      '<span class="hi-proj">' + esc(projLabel) + '</span>' +
       '<span class="hi-what">' + esc(item.what) + '</span>' +
       "</div>";
   }).join("");
@@ -449,7 +468,11 @@ function toggleHeroDropdown(projects) {
     el.addEventListener("click", function() {
       dd.hidden = true;
       _heroDropdownOpen = false;
-      expandProjectByKey(el.dataset.key);
+      if (el.dataset.unlinked === "1") {
+        openConversationsView();
+      } else {
+        expandProjectByKey(el.dataset.key);
+      }
     });
   });
   dd.hidden = false;
@@ -944,8 +967,10 @@ function exitSearchMode() {
   if (sr) { sr.style.display = "none"; }
   var projView = document.getElementById("projects-view");
   var sessView = document.getElementById("sessions-view");
+  var convView = document.getElementById("conversations-view");
   if (projView) projView.style.display = viewMode === "projects" ? "" : "none";
   if (sessView) sessView.hidden = viewMode !== "sessions";
+  if (convView) convView.hidden = viewMode !== "conversations";
 }
 
 // ── view switching ────────────────────────────────────────────────────────
@@ -953,14 +978,106 @@ function switchToView(mode) {
   viewMode = mode;
   var projView = document.getElementById("projects-view");
   var sessView = document.getElementById("sessions-view");
-  var dailyChip = document.getElementById("daily-chip");
+  var convView = document.getElementById("conversations-view");
   var sessChip = document.getElementById("sessions-chip");
+  var convChip = document.getElementById("conversations-chip");
   if (projView) projView.style.display = mode === "projects" ? "" : "none";
   if (sessView) sessView.hidden = mode !== "sessions";
+  if (convView) convView.hidden = mode !== "conversations";
   if (sessChip) sessChip.classList.toggle("active", mode === "sessions");
+  if (convChip) convChip.classList.toggle("active", mode === "conversations");
   if (mode === "sessions") {
     renderSessionsView(_lastSessions.active, _lastSessions.archived);
   }
+  if (mode === "conversations") {
+    fetchAndRenderConversations();
+  }
+}
+
+// ── conversations strip ───────────────────────────────────────────────────
+function updateConversationsChip(conversations) {
+  var chip = document.getElementById("conversations-chip");
+  if (!chip) return;
+  if (!conversations) {
+    chip.textContent = "@ " + (t.strip_conversations || "Conversaciones");
+    return;
+  }
+  var total = conversations.length;
+  var openCount = conversations.filter(function(c) { return c.resolved_eff === 0; }).length;
+  chip.textContent = "@ " + total + " · " + openCount + " " + (t.conv_open || "abierta");
+}
+
+function fetchAndRenderConversations() {
+  var view = document.getElementById("conversations-view");
+  if (!view) return;
+  view.innerHTML = '<div class="dim" style="padding:8px 14px;font-size:12px">cargando…</div>';
+  fetch("/api/conversations")
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (!data) return;
+      _lastConversations = data.conversations || [];
+      updateConversationsChip(_lastConversations);
+      renderConversationsList(view, _lastConversations);
+    })
+    .catch(function() {
+      if (view) view.innerHTML = '<div class="dim" style="padding:8px 14px">error</div>';
+    });
+}
+
+function renderConversationsList(container, conversations) {
+  if (!conversations || conversations.length === 0) {
+    container.innerHTML = '<div class="dim" style="padding:8px 14px;font-size:12px">—</div>';
+    return;
+  }
+
+  // Sort: open first, then resolved; within each group by last_at DESC
+  var sorted = conversations.slice().sort(function(a, b) {
+    if (a.resolved_eff !== b.resolved_eff) return a.resolved_eff - b.resolved_eff;
+    return (b.last_at || 0) - (a.last_at || 0);
+  });
+
+  container.innerHTML = sorted.map(function(c) {
+    var excerpt = esc((c.text || "").slice(0, 120));
+    var age = c.last_at ? '<span class="dim">' + rel(c.last_at) + "</span>" : "";
+    var proj = c.project_key
+      ? '<span class="badge-sys">' + esc(c.project_key) + "</span>"
+      : '<span class="dim">' + esc(t.conv_no_project || "sin proyecto") + "</span>";
+    var statusBadge = c.resolved_eff === 0
+      ? '<span class="amber" style="font-size:10px">' + esc(t.conv_open || "abierta") + "</span>"
+      : '<span class="dim" style="font-size:10px">' + esc(t.conv_resolved || "respondida") + "</span>";
+    var resolveBtn = c.resolved_eff === 0
+      ? '<button class="sbtn-clear conv-resolve-btn" data-id="' + c.id + '" style="font-size:10px;padding:1px 6px">' + esc(t.conv_mark_resolved || "marcar respondida") + "</button>"
+      : "";
+    return '<div class="frow conv-row" style="align-items:flex-start;padding:6px 14px;gap:6px;border-bottom:1px solid var(--border,#21262d)">' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">' +
+          '<span class="amber" style="font-size:11px">' + esc(c.author || "") + "</span>" +
+          proj + statusBadge + age +
+        "</div>" +
+        '<div class="muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis">' + excerpt + "</div>" +
+      "</div>" +
+      (resolveBtn ? '<div style="flex:none">' + resolveBtn + "</div>" : "") +
+    "</div>";
+  }).join("");
+
+  // Wire resolve buttons
+  container.querySelectorAll(".conv-resolve-btn").forEach(function(btn) {
+    btn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      var id = btn.dataset.id;
+      btn.disabled = true;
+      fetch("/api/mentions/" + id + "/resolve", { method: "POST" })
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function() {
+          fetchAndRenderConversations();
+        })
+        .catch(function() { btn.disabled = false; });
+    });
+  });
+}
+
+function openConversationsView() {
+  switchToView("conversations");
 }
 
 // ── detail panel ──────────────────────────────────────────────────────────
@@ -1585,16 +1702,21 @@ function showToast(msg) {
 // ── poll ──────────────────────────────────────────────────────────────────
 async function poll() {
   try {
-    var [projRes, sessRes, dailyRes] = await Promise.all([
+    var [projRes, sessRes, dailyRes, convRes] = await Promise.all([
       fetch("/api/projects"),
       fetch("/api/sessions"),
       fetch("/api/daily"),
+      fetch("/api/conversations"),
     ]);
     if (projRes.ok) {
       var projData = await projRes.json();
       lang = projData.language || lang;  // projects response doesn't have language; sessions does
       t = I18N[lang] || I18N.es;
+      _unlinkedMentionsOpen = projData.unlinked_mentions_open || 0;
+      _unlinkedMentionsOpenItems = projData.unlinked_mentions_open_items || [];
       renderProjects(projData.projects || []);
+      // Update conversations chip total if conversations data already fetched
+      if (_lastConversations !== null) updateConversationsChip(_lastConversations);
     }
     if (sessRes.ok) {
       var sessData = await sessRes.json();
@@ -1613,6 +1735,16 @@ async function poll() {
       // only re-render daily if overlay is open
       var ov = document.getElementById("daily-overlay");
       if (ov && !ov.hidden) renderDaily(dailyData);
+    }
+    if (convRes.ok) {
+      var convData = await convRes.json();
+      _lastConversations = convData.conversations || [];
+      updateConversationsChip(_lastConversations);
+      // Re-render if conversations view is open
+      if (viewMode === "conversations") {
+        var convView = document.getElementById("conversations-view");
+        if (convView) renderConversationsList(convView, _lastConversations);
+      }
     }
     // Invalidate project detail cache on each poll
     _projectDetailCache.clear();
@@ -1670,6 +1802,15 @@ document.addEventListener("DOMContentLoaded", function() {
     sessChipEl.addEventListener("click", function() {
       if (viewMode === "sessions") switchToView("projects");
       else switchToView("sessions");
+    });
+  }
+
+  // Conversations chip
+  var convChipEl = document.getElementById("conversations-chip");
+  if (convChipEl) {
+    convChipEl.addEventListener("click", function() {
+      if (viewMode === "conversations") switchToView("projects");
+      else openConversationsView();
     });
   }
 

@@ -243,8 +243,21 @@ try {
     ],
   );
 
+  // Unlinked Slack mention (session_id IS NULL) — for conversations strip assertion
+  seedDb.run(
+    `INSERT OR IGNORE INTO mentions
+       (channel_id, channel_name, thread_ts, author, author_id, text, ts,
+        ask_count, resolved, first_at, last_at, session_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
+      "C-UNLINKED", "random", "1751999001.000001", "Jordan", "U099",
+      "Hey can anyone help with this?", "1751999001.000001",
+      1, 0, nowMs - 600_000, nowMs - 600_000, null,
+    ],
+  );
+
   seedDb.close();
-  console.log("DB seeded: summary, tasks, mention, PR link, daily for", todayDate);
+  console.log("DB seeded: summary, tasks, mention, PR link, daily, unlinked mention for", todayDate);
 
   // 2. Start server ─────────────────────────────────────────────────────
   console.log(`Starting server on port ${SERVER_PORT}...`);
@@ -461,6 +474,23 @@ try {
   const iRefreshExists = await evaluate(cdp, "document.getElementById('refresh-btn')?.tagName === 'BUTTON'");
   if (!iRefreshExists) fail("(i): #refresh-btn not found or not a BUTTON");
   console.log("✓ (i): #refresh-btn present");
+
+  // (j) Conversations strip: chip exists, unlinked mention counted in hero, click → view renders
+  const jChipExists = await evaluate(cdp, "!!document.getElementById('conversations-chip')");
+  if (!jChipExists) fail("(j): #conversations-chip not found");
+  // Hero should count the seeded unlinked mention (n >= 1)
+  const jHeroText = await evaluate(cdp, "(document.getElementById('hero')?.textContent || '').trim()");
+  const jHeroN = parseInt(jHeroText.replace(/[^0-9]/g, ""), 10);
+  if (isNaN(jHeroN) || jHeroN < 1) fail(`(j): hero n=${jHeroN} — unlinked mention not counted. Hero: "${jHeroText}"`);
+  // Click conversations chip → conversations-view visible
+  await evaluate(cdp, "document.getElementById('conversations-chip').click()");
+  await sleep(1200);
+  const jConvViewHidden = await evaluate(cdp, "document.getElementById('conversations-view').hidden");
+  if (jConvViewHidden) fail("(j): #conversations-view still hidden after chip click");
+  // The seeded unlinked mention author "Jordan" should appear in the view
+  const jConvText = await evaluate(cdp, "(document.getElementById('conversations-view')?.textContent || '').toLowerCase()");
+  if (!jConvText.includes("jordan")) fail(`(j): 'jordan' not found in conversations-view. Got: "${jConvText.slice(0, 200)}"`);
+  console.log("✓ (j): conversations chip → view with seeded unlinked mention, hero includes unlinked count");
 
   // Screenshot ──────────────────────────────────────────────────────────
   const screenshotResult = await cdp.send<any>("Page.captureScreenshot", { format: "png" });

@@ -16,7 +16,7 @@ import { runLinks, enrichPRs, defaultGhRunner } from "./links";
 import { enrichLinear } from "./linear";
 import { syncDeadlines } from "./deadlines";
 import { llmAllowed } from "./llm-gate";
-import { listProjects, projectDetail } from "./projects";
+import { listProjects, projectDetail, listConversations } from "./projects";
 
 const UI_DIR = join(import.meta.dir, "../ui");
 const STATIC = new Set(["index.html", "app.js", "style.css"]);
@@ -135,7 +135,21 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         });
       }
       if (url.pathname === "/api/projects") {
-        return Response.json({ projects: listProjects(db, Date.now()) });
+        type UnlinkedRow = { id: number; author: string; text: string | null };
+        const unlinkedItems = db.query(
+          `SELECT id, author, text FROM mentions
+           WHERE session_id IS NULL
+             AND resolved = 0 AND (resolved_manual IS NULL OR resolved_manual = 0)
+           ORDER BY last_at DESC LIMIT 20`
+        ).all() as UnlinkedRow[];
+        return Response.json({
+          projects: listProjects(db, Date.now()),
+          unlinked_mentions_open: unlinkedItems.length,
+          unlinked_mentions_open_items: unlinkedItems,
+        });
+      }
+      if (url.pathname === "/api/conversations") {
+        return Response.json({ conversations: listConversations(db) });
       }
       const pdm = url.pathname.match(/^\/api\/projects\/([^/]+)\/detail$/);
       if (pdm) {
