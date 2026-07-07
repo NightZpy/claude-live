@@ -7,36 +7,76 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <main class="wrap">
-    <div class="topbar">
-      <div class="topbar-row">
-        <input id="search" type="search" autocomplete="off">
-        <button id="refresh-btn" title="Actualizar todo">↻</button>
-        <button id="settings-btn" title="Configuración">⚙</button>
-      </div>
-      <div id="filters"></div>
-    </div>
+  <div class="app-wrap">
+
+    <!-- HEADER ─────────────────────────────────────────────────────────── -->
+    <header id="header">
+      <div id="hero" class="hero dim" title="Te esperan">Te esperan: …</div>
+      <div id="hero-dropdown" class="hero-dropdown" hidden></div>
+      <input id="search" type="search" autocomplete="off" placeholder="buscar…">
+      <div id="usage-chip" class="usage-chip dim">LLM …</div>
+      <div id="usage-popover" class="usage-popover" hidden></div>
+      <button id="refresh-btn" title="Actualizar todo">↻</button>
+      <button id="settings-btn" title="Configuración">⚙</button>
+    </header>
+
+    <!-- PAUSED BANNER ──────────────────────────────────────────────────── -->
     <div id="paused-banner" hidden></div>
-    <div class="cols">
+
+    <!-- MAIN AREA ──────────────────────────────────────────────────────── -->
+    <div class="main-area">
+
+      <!-- LEDGER (left column) -->
       <div class="ledger">
-        <div id="daily-card" hidden></div>
-        <div id="slack-card" hidden></div>
-        <div id="signals-card" hidden></div>
-        <div class="seclbl" id="lbl-active"></div>
-        <div id="sessions"></div>
-        <div class="seclbl" id="lbl-archived"></div>
-        <div id="archived"></div>
+
+        <!-- SECONDARY STRIP -->
+        <div id="secondary-strip">
+          <button id="daily-chip" class="strip-chip">📋 Daily</button>
+          <button id="sessions-chip" class="strip-chip">Sesiones</button>
+        </div>
+
+        <!-- PROJECTS VIEW (default) -->
+        <div id="projects-view">
+          <div id="projects-list"></div>
+        </div>
+
+        <!-- FLAT SESSIONS VIEW (secondary) -->
+        <div id="sessions-view" hidden>
+          <div class="seclbl" id="lbl-active"></div>
+          <div id="sessions-list"></div>
+          <div class="seclbl" id="lbl-archived"></div>
+          <div id="archived-list"></div>
+        </div>
+
+        <!-- USAGE (bottom of ledger — backward-compat IDs) -->
         <div id="usage-card"></div>
       </div>
+
+      <!-- DETAIL PANEL (right column) -->
       <aside id="detail" hidden>
         <div class="d-head">
           <span class="d-title"></span>
-          <button id="d-resume-copy"></button><button id="d-copy-id"></button>
+          <button id="d-resume-copy"></button>
+          <button id="d-copy-id"></button>
           <button class="d-close" id="d-close">✕ esc</button>
         </div>
         <div id="d-body"></div>
       </aside>
     </div>
+
+    <!-- DAILY SLIDE-OVER ───────────────────────────────────────────────── -->
+    <div id="daily-overlay" hidden>
+      <div id="daily-backdrop" class="overlay-backdrop"></div>
+      <div id="daily-drawer" class="overlay-drawer">
+        <div id="daily-drawer-head">
+          <span id="daily-drawer-title">Daily</span>
+          <button id="daily-close">✕</button>
+        </div>
+        <div id="daily-card"></div>
+      </div>
+    </div>
+
+    <!-- SETTINGS PANEL ─────────────────────────────────────────────────── -->
     <div id="settings-panel" hidden>
       <div id="settings-overlay"></div>
       <div id="settings-drawer">
@@ -47,7 +87,8 @@
         <div id="settings-body"></div>
       </div>
     </div>
-  </main>
+
+  </div>
   <script src="/app.js"></script>
 </body>
 </html>
