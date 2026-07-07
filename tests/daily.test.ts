@@ -22,12 +22,14 @@ function insertSession(
     name?: string | null;
     cwd?: string | null;
     summary?: string | null;
+    summary_next?: string | null;
     archived_reason?: string | null;
+    git_repo?: string | null;
   }
 ): void {
   db.run(
-    `INSERT INTO sessions (id, instance, status, kind, started_at, last_activity, name, cwd, summary, archived_reason)
-     VALUES (?, 'test', ?, ?, 0, ?, ?, ?, ?, ?)`,
+    `INSERT INTO sessions (id, instance, status, kind, started_at, last_activity, name, cwd, summary, summary_next, archived_reason, git_repo)
+     VALUES (?, 'test', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
     [
       fields.id,
       fields.status ?? "running",
@@ -36,8 +38,17 @@ function insertSession(
       fields.name ?? null,
       fields.cwd ?? null,
       fields.summary ?? null,
+      fields.summary_next ?? null,
       fields.archived_reason ?? null,
+      fields.git_repo ?? null,
     ]
+  );
+}
+
+function insertLink(db: Database, sessionId: string, kind: string, ref: string, title?: string): void {
+  db.run(
+    `INSERT INTO links (session_id, kind, ref, title) VALUES (?, ?, ?, ?)`,
+    [sessionId, kind, ref, title ?? null]
   );
 }
 
@@ -294,4 +305,77 @@ test("generateDaily throws LLM_BLOCKED:cap when cap is reached", async () => {
     generateDaily(db, fakeRunner, "en", NOW, baseCfg({ llmDailyCap: 1 }))
   ).rejects.toThrow("LLM_BLOCKED:cap");
   expect(calls).toBe(0);
+});
+
+// --- enriched digest: project name + PR refs ---
+
+test("buildDailyDigest groups by project and includes git_repo name", () => {
+  const db = openDb(":memory:");
+  insertSession(db, {
+    id: "s1",
+    git_repo: "org/acme-web",
+    summary: "migrated status bar",
+    last_activity: NOW,
+  });
+  const digest = buildDailyDigest(db, NOW);
+  expect(digest).toContain("acme-web");
+  expect(digest).toContain("migrated status bar");
+});
+
+test("buildDailyDigest includes PR refs from links table", () => {
+  const db = openDb(":memory:");
+  insertSession(db, { id: "s1", git_repo: "org/search-api", summary: "term enrichment", last_activity: NOW });
+  insertLink(db, "s1", "pr", "#451", "Migrate status bar");
+  const digest = buildDailyDigest(db, NOW);
+  expect(digest).toContain("search-api");
+  expect(digest).toContain("#451");
+  expect(digest).toContain("Migrate status bar");
+});
+
+test("buildDailyDigest includes linear refs from links table", () => {
+  const db = openDb(":memory:");
+  insertSession(db, { id: "s1", git_repo: "org/agent-x", summary: "cleanup", last_activity: NOW });
+  insertLink(db, "s1", "linear", "AG-890", "Agent cleanup task");
+  const digest = buildDailyDigest(db, NOW);
+  expect(digest).toContain("AG-890");
+});
+
+test("buildDailyDigest includes summary_next in digest", () => {
+  const db = openDb(":memory:");
+  insertSession(db, {
+    id: "s1",
+    git_repo: "org/acme-web",
+    summary: "fixed encoding bug",
+    summary_next: "open PR today",
+    last_activity: NOW,
+  });
+  const digest = buildDailyDigest(db, NOW);
+  expect(digest).toContain("fixed encoding bug");
+  expect(digest).toContain("open PR today");
+});
+
+test("buildDailyDigest includes blocked_on in task lines", () => {
+  const db = openDb(":memory:");
+  insertSession(db, { id: "s1", git_repo: "org/acme-web", last_activity: NOW });
+  db.run(
+    `INSERT INTO tasks (session_id, title, status, opened_at, blocked_on) VALUES (?, ?, ?, ?, ?)`,
+    ["s1", "Deploy to prod", "blocked", NOW - 1000, "waiting for infra AG-1782"]
+  );
+  const digest = buildDailyDigest(db, NOW);
+  expect(digest).toContain("Deploy to prod");
+  expect(digest).toContain("waiting for infra AG-1782");
+});
+
+test("generateDaily prompt contains good/bad bullet example markers", async () => {
+  const db = openDb(":memory:");
+  let capturedPrompt = "";
+  const trackRunner: LlmRunner = async (prompt) => {
+    capturedPrompt = prompt;
+    return CANNED_DAILY;
+  };
+  await generateDaily(db, trackRunner, "es", NOW);
+  expect(capturedPrompt).toContain("BAD");
+  expect(capturedPrompt).toContain("GOOD");
+  expect(capturedPrompt).toContain("acme-web");
+  expect(capturedPrompt).toContain("30 modifications");
 });
