@@ -62,6 +62,8 @@ const I18N = {
     strip_conversations: "Conversaciones",
     conv_open: "abierta", conv_resolved: "respondida",
     conv_mark_resolved: "marcar respondida", conv_no_project: "sin proyecto",
+    conv_filter_open: "Abiertas", conv_filter_resolved: "Respondidas", conv_filter_all: "Todas",
+    conv_all_resolved: "Todo respondido",
     usage_chip_paused: "⏸ pausado",
   },
   en: {
@@ -123,6 +125,8 @@ const I18N = {
     strip_conversations: "Conversations",
     conv_open: "open", conv_resolved: "resolved",
     conv_mark_resolved: "mark resolved", conv_no_project: "no project",
+    conv_filter_open: "Open", conv_filter_resolved: "Resolved", conv_filter_all: "All",
+    conv_all_resolved: "All resolved",
     usage_chip_paused: "⏸ paused",
   },
   pt: {
@@ -184,6 +188,8 @@ const I18N = {
     strip_conversations: "Conversas",
     conv_open: "aberta", conv_resolved: "respondida",
     conv_mark_resolved: "marcar respondida", conv_no_project: "sem projeto",
+    conv_filter_open: "Abertas", conv_filter_resolved: "Respondidas", conv_filter_all: "Todas",
+    conv_all_resolved: "Tudo respondido",
     usage_chip_paused: "⏸ pausado",
   },
 };
@@ -206,6 +212,7 @@ let _heroDropdownOpen = false;
 let _unlinkedMentionsOpen = 0;
 let _unlinkedMentionsOpenItems = [];
 let _lastConversations = null;  // null = not yet fetched
+let _convFilter = 'open';       // 'open' | 'resolved' | 'all'
 
 // ── pure helpers (ported) ─────────────────────────────────────────────────
 function esc(s) {
@@ -405,6 +412,19 @@ function buildEventsFilterRow(presentKinds, activeEvKinds) {
     var soloActive = activeEvKinds.size === 1 && activeEvKinds.has("prompt");
     chips += '<span class="ev-chip ev-chip-solo' + (soloActive ? " active" : "") + '" data-kind="__solo_prompts__">solo prompts</span>';
   }
+  return '<div class="ev-filter-row">' + chips + "</div>";
+}
+
+function buildConversationsFilterRow(activeFilter) {
+  var segments = [
+    { key: "open",     label: t.conv_filter_open     || "Abiertas"   },
+    { key: "resolved", label: t.conv_filter_resolved || "Respondidas" },
+    { key: "all",      label: t.conv_filter_all      || "Todas"      },
+  ];
+  var chips = segments.map(function(seg) {
+    return '<span class="ev-chip' + (activeFilter === seg.key ? " active" : "") +
+      '" data-conv-filter="' + esc(seg.key) + '">' + esc(seg.label) + "</span>";
+  }).join("");
   return '<div class="ev-filter-row">' + chips + "</div>";
 }
 
@@ -1025,18 +1045,37 @@ function fetchAndRenderConversations() {
 }
 
 function renderConversationsList(container, conversations) {
-  if (!conversations || conversations.length === 0) {
-    container.innerHTML = '<div class="dim" style="padding:8px 14px;font-size:12px">—</div>';
+  var all = conversations || [];
+  var filterRow = buildConversationsFilterRow(_convFilter);
+
+  // Apply active filter
+  var filtered;
+  if (_convFilter === "open") {
+    filtered = all.filter(function(c) { return c.resolved_eff === 0; });
+  } else if (_convFilter === "resolved") {
+    filtered = all.filter(function(c) { return c.resolved_eff === 1; });
+  } else {
+    filtered = all;
+  }
+
+  if (filtered.length === 0) {
+    var emptyHtml = '<div class="dim" style="padding:8px 14px;font-size:12px">—</div>';
+    if (_convFilter === "open" && all.some(function(c) { return c.resolved_eff === 1; })) {
+      emptyHtml += '<div class="dim" style="padding:2px 14px;font-size:11px">' +
+        esc(t.conv_all_resolved || "Todo respondido") + "</div>";
+    }
+    container.innerHTML = filterRow + emptyHtml;
+    wireConversationsFilter(container, all);
     return;
   }
 
   // Sort: open first, then resolved; within each group by last_at DESC
-  var sorted = conversations.slice().sort(function(a, b) {
+  var sorted = filtered.slice().sort(function(a, b) {
     if (a.resolved_eff !== b.resolved_eff) return a.resolved_eff - b.resolved_eff;
     return (b.last_at || 0) - (a.last_at || 0);
   });
 
-  container.innerHTML = sorted.map(function(c) {
+  container.innerHTML = filterRow + sorted.map(function(c) {
     var excerpt = esc((c.text || "").slice(0, 120));
     var age = c.last_at ? '<span class="dim">' + rel(c.last_at) + "</span>" : "";
     var proj = c.project_key
@@ -1060,6 +1099,9 @@ function renderConversationsList(container, conversations) {
     "</div>";
   }).join("");
 
+  // Wire filter chips
+  wireConversationsFilter(container, all);
+
   // Wire resolve buttons
   container.querySelectorAll(".conv-resolve-btn").forEach(function(btn) {
     btn.addEventListener("click", function(e) {
@@ -1072,6 +1114,15 @@ function renderConversationsList(container, conversations) {
           fetchAndRenderConversations();
         })
         .catch(function() { btn.disabled = false; });
+    });
+  });
+}
+
+function wireConversationsFilter(container, allConversations) {
+  container.querySelectorAll("[data-conv-filter]").forEach(function(chip) {
+    chip.addEventListener("click", function() {
+      _convFilter = chip.dataset.convFilter;
+      renderConversationsList(container, _lastConversations || allConversations);
     });
   });
 }
