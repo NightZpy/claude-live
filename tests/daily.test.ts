@@ -141,16 +141,15 @@ test("buildDailyDigest caps at 12000 chars", () => {
   expect(digest.length).toBeLessThanOrEqual(12000);
 });
 
-test("buildDailyDigest excludes active sessions from before today (midnight boundary)", () => {
+test("buildDailyDigest includes active sessions from full 24h window, not just since midnight", () => {
   const db = openDb(":memory:");
-  const d = new Date(NOW);
-  d.setHours(0, 0, 0, 0);
-  const midnightToday = d.getTime();
-  insertSession(db, { id: "s1", name: "before-midnight", last_activity: midnightToday - 1 });
-  insertSession(db, { id: "s2", name: "after-midnight", last_activity: midnightToday + 1 });
+  // 20h ago: before local midnight for many timezones, but within the 24h window — must be included
+  const twentyHoursAgo = NOW - 20 * 3_600_000;
+  insertSession(db, { id: "s1", name: "twenty-hours-ago", last_activity: twentyHoursAgo });
+  insertSession(db, { id: "s2", name: "recent-session", last_activity: NOW - 1_000 });
   const digest = buildDailyDigest(db, NOW);
-  expect(digest).not.toContain("before-midnight");
-  expect(digest).toContain("after-midnight");
+  expect(digest).toContain("twenty-hours-ago");
+  expect(digest).toContain("recent-session");
 });
 
 test("buildDailyDigest excludes archived sessions older than 24h", () => {
