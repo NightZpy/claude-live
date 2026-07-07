@@ -76,7 +76,7 @@ test("static assets serve and expose CDP contract", async () => {
   const srv = createServer(db, { port: 0 });
   const html = await (await fetch(`http://127.0.0.1:${srv.port}/`)).text();
   expect(html).toContain('id="search"');
-  expect(html).toContain('id="sessions"');
+  expect(html).toContain('id="sessions-view"');
   expect(html).toContain('id="detail"');
   const js = await (await fetch(`http://127.0.0.1:${srv.port}/app.js`)).text();
   expect(js).toContain("I18N");

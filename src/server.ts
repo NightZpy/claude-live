@@ -16,6 +16,7 @@ import { runLinks, enrichPRs, defaultGhRunner } from "./links";
 import { enrichLinear } from "./linear";
 import { syncDeadlines } from "./deadlines";
 import { llmAllowed } from "./llm-gate";
+import { listProjects, projectDetail } from "./projects";
 
 const UI_DIR = join(import.meta.dir, "../ui");
 const STATIC = new Set(["index.html", "app.js", "style.css"]);
@@ -132,6 +133,16 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           active: db.query(ACTIVE_SQL).all(),
           archived: db.query(ARCHIVED_SQL).all(),
         });
+      }
+      if (url.pathname === "/api/projects") {
+        return Response.json({ projects: listProjects(db, Date.now()) });
+      }
+      const pdm = url.pathname.match(/^\/api\/projects\/([^/]+)\/detail$/);
+      if (pdm) {
+        const key = decodeURIComponent(pdm[1]);
+        const detail = projectDetail(db, key);
+        if (!detail) return new Response("not found", { status: 404 });
+        return Response.json(detail);
       }
       if (url.pathname === "/api/inbox") {
         return Response.json({
