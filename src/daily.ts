@@ -53,18 +53,13 @@ function projectNameFromSession(s: Pick<EnrichedSessionRow, "git_repo" | "cwd">)
 export function buildDailyDigest(db: Database, now: number): string {
   const since24h = now - 86_400_000;
 
-  const d = new Date(now);
-  d.setHours(0, 0, 0, 0);
-  const midnightToday = d.getTime();
-
   const sessions = db.query(
     `SELECT id, name, cwd, git_repo, status, summary, summary_next, archived_reason, transcript_path
      FROM sessions
      WHERE kind != 'worker'
-       AND ((status != 'archived' AND last_activity >= ?)
-            OR (status = 'archived' AND last_activity >= ?))
+       AND last_activity >= ?
      ORDER BY last_activity DESC LIMIT 30`
-  ).all(midnightToday, since24h) as EnrichedSessionRow[];
+  ).all(since24h) as EnrichedSessionRow[];
 
   if (sessions.length === 0) return "";
 
