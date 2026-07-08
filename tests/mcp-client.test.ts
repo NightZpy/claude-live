@@ -8,7 +8,9 @@ import {
   mcpToolsList,
   mcpToolsCall,
   parseToolRows,
+  findMyIssuesTool,
   type McpSession,
+  type McpTool,
   type FetchFn,
 } from "../src/mcp-client";
 
@@ -176,4 +178,48 @@ test("mcpToolsCall Mcp-Session-Id header is sent on subsequent calls", async () 
   const session: McpSession = { sessionId: "my-session-id", endpoint: "https://mcp.linear.app/mcp", token: "tok" };
   await mcpToolsCall(session, "linear_myIssues", {}, fakeFetch);
   expect(capturedHeaders["mcp-session-id"] ?? capturedHeaders["Mcp-Session-Id"]).toBe("my-session-id");
+});
+
+// ── S1: findMyIssuesTool read-only allowlist ─────────────────────────────────
+
+function makeTool(name: string): McpTool {
+  return { name, description: `Tool ${name}` };
+}
+
+test("findMyIssuesTool returns null when list contains only mutating tools", () => {
+  const tools = [
+    makeTool("create_issue"),
+    makeTool("update_issue"),
+    makeTool("delete_issue"),
+    makeTool("archive_issue"),
+  ];
+  expect(findMyIssuesTool(tools)).toBeNull();
+});
+
+test("findMyIssuesTool picks list_my_issues over mutators", () => {
+  const tools = [
+    makeTool("create_issue"),
+    makeTool("list_my_issues"),
+    makeTool("update_issue"),
+  ];
+  const result = findMyIssuesTool(tools);
+  expect(result?.name).toBe("list_my_issues");
+});
+
+test("findMyIssuesTool picks search_issues (snake_case)", () => {
+  const tools = [makeTool("search_issues"), makeTool("create_issue")];
+  const result = findMyIssuesTool(tools);
+  expect(result?.name).toBe("search_issues");
+});
+
+test("findMyIssuesTool picks linear_myIssues (camelCase prefix)", () => {
+  const tools = [makeTool("linear_myIssues"), makeTool("create_issue")];
+  const result = findMyIssuesTool(tools);
+  expect(result?.name).toBe("linear_myIssues");
+});
+
+test("findMyIssuesTool does NOT fall through to arbitrary issue tool", () => {
+  // Tools that have "issue" in name but are NOT on the safe allowlist
+  const tools = [makeTool("issue_tracker"), makeTool("some_issue_helper")];
+  expect(findMyIssuesTool(tools)).toBeNull();
 });

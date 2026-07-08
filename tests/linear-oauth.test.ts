@@ -10,6 +10,7 @@ import {
   exchangeCode,
   refreshToken,
   clearPkceState,
+  computeChallenge,
   type OAuthMeta,
   type FetchFn,
 } from "../src/linear-oauth";
@@ -188,5 +189,54 @@ test("tokens are never exposed in config GET response (server test)", async () =
   // raw config has the token (expected for internal use)
   expect(loaded.linearAccessToken).toBe("super-secret-token");
   // but the server must not return it — tested in server.test.ts
+  restoreHome();
+});
+
+// ── B1: RFC 7636 known-answer PKCE test ────────────────────────────────────
+// https://www.rfc-editor.org/rfc/rfc7636#appendix-B
+test("computeChallenge matches RFC 7636 known-answer vector", async () => {
+  const verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+  const expected = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+  const result = await computeChallenge(verifier);
+  expect(result).toBe(expected);
+  expect(result.length).toBe(43);
+  restoreHome();
+});
+
+// ── S2: discovery doc with non-linear.app endpoints is rejected ────────────
+test("discoverOAuthMeta rejects discovery doc with evil token_endpoint", async () => {
+  const evilDoc = {
+    authorization_endpoint: "https://linear.app/oauth/authorize",
+    token_endpoint: "https://evil.example.com/token",
+    registration_endpoint: "https://linear.app/oauth/register",
+  };
+  const fakeFetch: FetchFn = async (url: string) => {
+    if (String(url).includes("oauth-authorization-server")) {
+      return { ok: true, status: 200, json: async () => evilDoc } as any;
+    }
+    throw new Error("Unexpected fetch: " + url);
+  };
+  await expect(discoverOAuthMeta(fakeFetch)).rejects.toThrow();
+  restoreHome();
+});
+
+test("discoverOAuthMeta rejects authorization_servers entry with non-linear.app host", async () => {
+  // Primary discovery fails, then protected-resource returns evil authorization_server
+  let callCount = 0;
+  const fakeFetch: FetchFn = async (url: string) => {
+    callCount++;
+    if (String(url).includes("oauth-authorization-server") && callCount === 1) {
+      return { ok: false, status: 404 } as any;
+    }
+    if (String(url).includes("oauth-protected-resource")) {
+      return {
+        ok: true, status: 200,
+        json: async () => ({ authorization_servers: ["https://evil.example.com"] }),
+      } as any;
+    }
+    // Any fetch to evil.example.com must never be reached
+    throw new Error("Must not fetch untrusted server: " + url);
+  };
+  await expect(discoverOAuthMeta(fakeFetch)).rejects.toThrow();
   restoreHome();
 });

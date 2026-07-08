@@ -1493,7 +1493,7 @@ function renderPRsList(container, prsData, filter) {
   container.querySelectorAll("[data-url]").forEach(function(el) {
     el.addEventListener("click", function() {
       var url = el.dataset.url;
-      if (url) window.open(url, "_blank", "noopener");
+      if (url && /^https?:\/\//i.test(url)) window.open(url, "_blank", "noopener");
     });
   });
 }
@@ -1579,7 +1579,7 @@ function renderLinearList(container, issuesData) {
   container.querySelectorAll("[data-url]").forEach(function(el) {
     el.addEventListener("click", function() {
       var url = el.dataset.url;
-      if (url) window.open(url, "_blank", "noopener");
+      if (url && /^https?:\/\//i.test(url)) window.open(url, "_blank", "noopener");
     });
   });
 }

@@ -1276,3 +1276,26 @@ test("/api/sessions: session with literal filler summary and zero signals IS fil
   expect(s.is_filler).toBe(1); // explicit filler phrase + zero activity → IS filler
   srv.stop();
 });
+
+// ── B2: OAuth callback XSS prevention ────────────────────────────────────────
+
+test("/api/linear/callback: error param is HTML-escaped (no reflected XSS)", async () => {
+  const db = openDb(":memory:");
+  const srv = createServer(db, { port: 0 });
+  try {
+    const xss = "<script>alert(1)</script>";
+    const url = `http://127.0.0.1:${srv.port}/api/linear/callback?error=${encodeURIComponent(xss)}`;
+    const res = await fetch(url);
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    // Must NOT contain the raw <script> tag
+    expect(body).not.toContain("<script>");
+    // Must contain the escaped form
+    expect(body).toContain("&lt;script&gt;");
+    // Must set CSP header
+    const csp = res.headers.get("content-security-policy");
+    expect(csp).toContain("default-src 'none'");
+  } finally {
+    srv.stop();
+  }
+});

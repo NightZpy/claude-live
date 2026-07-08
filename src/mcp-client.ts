@@ -231,18 +231,31 @@ function toIssueRow(issue: any): IssueRow | null {
 
 // ── Find best tool for listing assigned issues ────────────────────────────
 
+// S1: Tools whose name contains any of these verbs are mutating and must never be selected.
+const MUTATING_RE = /(create|update|delete|archive|remove|move|assign)/i;
+
+// S1: Normalized (lowercase, underscores stripped) patterns for read-only issue tools.
+// Covers both camelCase (linear_myIssues → linearmyissues) and snake_case variants.
+const SAFE_PATTERNS = ["listmyissues", "myissues", "searchissues", "listissues", "getissues"];
+
+function _normalizeName(name: string): string {
+  return name.toLowerCase().replace(/_/g, "");
+}
+
 /**
  * Discovers the correct tool name for listing current user's open issues.
- * Preference order:
- *   1. Name contains "myIssues" or "my_issues" (dedicated tool)
- *   2. Name contains "searchIssues" / "listIssues" (filterable tool)
- *   3. First tool whose name contains "issue" (fallback)
+ * Only selects tools on the read-only allowlist; never falls back to an
+ * arbitrary "issue" tool that could be a mutating operation.
  *
  * The tool name for the real Linear MCP is `linear_myIssues`.
  */
 export function findMyIssuesTool(tools: McpTool[]): McpTool | null {
-  const byName = (sub: string) => tools.find(t => t.name.toLowerCase().includes(sub));
-  return byName("myissues") ?? byName("my_issues") ?? byName("searchissues") ?? byName("listissues") ?? byName("issue") ?? null;
+  const safe = tools.filter(t => !MUTATING_RE.test(t.name));
+  for (const pattern of SAFE_PATTERNS) {
+    const match = safe.find(t => _normalizeName(t.name).includes(pattern));
+    if (match) return match;
+  }
+  return null;
 }
 
 /**

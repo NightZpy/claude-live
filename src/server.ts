@@ -24,6 +24,12 @@ import { listProjects, projectDetail, listConversations } from "./projects";
 const UI_DIR = join(import.meta.dir, "../ui");
 const STATIC = new Set(["index.html", "app.js", "style.css"]);
 
+// B2: HTML-escape helper for interpolating untrusted values into HTML responses.
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
 const _sseControllers = new Set<ReadableStreamDefaultController<string>>();
 let _watcherStarted = false;
 
@@ -601,8 +607,8 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         const errParam = url.searchParams.get("error");
         if (errParam) {
           return new Response(
-            `<html><body><p>Linear auth error: ${errParam}. Cierra esta pestaña.</p></body></html>`,
-            { status: 400, headers: { "Content-Type": "text/html; charset=utf-8" } }
+            `<html><body><p>Linear auth error: ${escHtml(errParam)}. Cierra esta pestaña.</p></body></html>`,
+            { status: 400, headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'" } }
           );
         }
         if (!code || !state) return new Response("bad request", { status: 400 });
@@ -621,7 +627,7 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           await exchangeCode(meta, clientId, clientSecret, state, code, port);
           return new Response(
             `<html><body><p>Linear conectado ✓. Cierra esta pestaña.</p></body></html>`,
-            { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } }
+            { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'" } }
           );
         } catch {
           return new Response(

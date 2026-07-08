@@ -37,20 +37,11 @@ function _cleanExpired(): void {
 
 // ── PKCE helpers ──────────────────────────────────────────────────────────
 
+// B1 fix: Buffer.from().toString("base64url") is correct for all input lengths.
+// The hand-rolled implementation dropped the final char for 2-byte trailing groups
+// (SHA-256 is 32 bytes; 32%3 == 2), producing 42-char challenges instead of 43.
 function base64url(buf: Uint8Array): string {
-  let b64 = "";
-  const table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  let i = 0;
-  while (i < buf.length) {
-    const b0 = buf[i++] ?? 0;
-    const b1 = buf[i++] ?? 0;
-    const b2 = buf[i++] ?? 0;
-    b64 += table[b0 >> 2];
-    b64 += table[((b0 & 3) << 4) | (b1 >> 4)];
-    b64 += i - 1 < buf.length ? table[((b1 & 0xf) << 2) | (b2 >> 6)] : "=";
-    b64 += i < buf.length ? table[b2 & 0x3f] : "=";
-  }
-  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+  return Buffer.from(buf).toString("base64url");
 }
 
 async function generateVerifier(): Promise<string> {
@@ -60,11 +51,22 @@ async function generateVerifier(): Promise<string> {
   return base64url(bytes);
 }
 
-async function computeChallenge(verifier: string): Promise<string> {
+export async function computeChallenge(verifier: string): Promise<string> {
   const encoder = new TextEncoder();
   const data = encoder.encode(verifier);
   const digest = await crypto.subtle.digest("SHA-256", data);
   return base64url(new Uint8Array(digest));
+}
+
+// ── OAuth endpoint host validation (S2) ───────────────────────────────────
+
+function isLinearHost(urlStr: string): boolean {
+  try {
+    const u = new URL(urlStr);
+    return u.protocol === "https:" && (u.hostname === "linear.app" || u.hostname.endsWith(".linear.app"));
+  } catch {
+    return false;
+  }
 }
 
 // ── Discovery ─────────────────────────────────────────────────────────────
@@ -90,6 +92,8 @@ export async function discoverOAuthMeta(fetchFn: FetchFn = fetch): Promise<OAuth
   const rdoc = await rres.json() as any;
   const servers: string[] = Array.isArray(rdoc.authorization_servers) ? rdoc.authorization_servers : [];
   for (const srv of servers) {
+    // S2: reject any authorization_server entry that is not a linear.app HTTPS URL
+    if (!isLinearHost(srv)) continue;
     try {
       const sres = await fetchFn(srv + "/.well-known/oauth-authorization-server");
       if (sres.ok) {
@@ -108,11 +112,12 @@ function extractMeta(doc: any): OAuthMeta | null {
     typeof doc?.token_endpoint === "string" &&
     typeof doc?.registration_endpoint === "string"
   ) {
-    return {
-      authorization_endpoint: doc.authorization_endpoint,
-      token_endpoint: doc.token_endpoint,
-      registration_endpoint: doc.registration_endpoint,
-    };
+    const ae = doc.authorization_endpoint as string;
+    const te = doc.token_endpoint as string;
+    const re = doc.registration_endpoint as string;
+    // S2: reject any discovery doc whose endpoints are not on linear.app
+    if (!isLinearHost(ae) || !isLinearHost(te) || !isLinearHost(re)) return null;
+    return { authorization_endpoint: ae, token_endpoint: te, registration_endpoint: re };
   }
   return null;
 }
