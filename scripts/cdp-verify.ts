@@ -281,6 +281,21 @@ try {
     ],
   );
 
+  // Linear issues for assertion (l): seed directly (bypass OAuth network path)
+  const linearIssueRows: Array<[string, string, string, string, string, string, number, string, number]> = [
+    ["ENG-001", "Fix auth regression", "https://linear.app/acme/issue/ENG-001", "In Progress", "started", "ENG", 1, new Date(nowMs - 3600000).toISOString(), nowMs],
+    ["ENG-002", "Write unit tests",    "https://linear.app/acme/issue/ENG-002", "Todo",        "unstarted","ENG", 2, new Date(nowMs - 7200000).toISOString(), nowMs],
+    ["ENG-003", "Deploy to staging",   "https://linear.app/acme/issue/ENG-003", "Todo",        "unstarted","ENG", 3, new Date(nowMs - 1800000).toISOString(), nowMs],
+  ];
+  for (const [identifier, title, url, state_name, state_type, team_key, priority, updated_at, fetched_at] of linearIssueRows) {
+    seedDb.run(
+      `INSERT OR IGNORE INTO linear_issues
+         (identifier, title, url, state_name, state_type, team_key, priority, updated_at, fetched_at)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+      [identifier, title, url, state_name, state_type, team_key, priority, updated_at, fetched_at],
+    );
+  }
+
   // PRs for assertion (k): one per bucket
   const prBuckets: Array<[number, string, string, string]> = [
     [101, "needs_my_review",      "cdptest-needs-review",   "alice"],
@@ -322,7 +337,7 @@ try {
   );
 
   seedDb.close();
-  console.log("DB seeded: summary, tasks, mention, PR link, daily, unlinked mention, PRs, filler/active-file sessions for", todayDate);
+  console.log("DB seeded: summary, tasks, mention, PR link, daily, unlinked mention, PRs, linear issues, filler/active-file sessions for", todayDate);
 
   // 2. Start server ─────────────────────────────────────────────────────
   console.log(`Starting server on port ${SERVER_PORT}...`);
@@ -629,6 +644,43 @@ try {
   if (kPrsText.includes("cdptest-blocked")) fail(`(k): 'cdptest-blocked' (non-actionable) appeared in default actionable filter view`);
   if (kPrsText.includes("cdptest-reviewed")) fail(`(k): 'cdptest-reviewed' (non-actionable) appeared in default actionable filter view`);
   console.log("✓ (k): PRs chip → view shows actionable buckets by default, hero includes actionable PR count");
+
+  // (l) Linear chip → #linear-view visible; seeded issues render sorted by priority; hero includes count
+  const lChipExists = await evaluate(cdp, "!!document.getElementById('linear-chip')");
+  if (!lChipExists) fail("(l): #linear-chip not found");
+
+  // Navigate back to projects first
+  await evaluate(cdp, "document.getElementById('prs-chip').click()"); // toggle off prs
+  await sleep(300);
+
+  // Hero should include the 3 seeded Linear issues in its count
+  const lHeroText = await evaluate(cdp, "(document.getElementById('hero')?.textContent || '').trim()");
+  const lHeroN = parseInt(lHeroText.replace(/[^0-9]/g, ""), 10);
+  // We seeded 3 Linear issues; combined with PRs the hero count must be ≥ 3
+  if (isNaN(lHeroN) || lHeroN < 3) {
+    if (!lHeroText.toLowerCase().includes("up to date") && !lHeroText.includes("al día")) {
+      fail(`(l): hero="${lHeroText}", expected ≥3 (3 seeded linear issues)`);
+    }
+  }
+  console.log(`✓ (l): hero includes linear count: "${lHeroText}"`);
+
+  // Click linear-chip → linear-view becomes visible
+  await evaluate(cdp, "document.getElementById('linear-chip').click()");
+  await sleep(1200);
+  const lViewHidden = await evaluate(cdp, "document.getElementById('linear-view').hidden");
+  if (lViewHidden) fail("(l): #linear-view still hidden after chip click");
+
+  // Seeded issues should appear, sorted by priority (ENG-001 priority=1 first, ENG-003 priority=3 last)
+  const lViewText = await evaluate(cdp, "(document.getElementById('linear-view')?.textContent || '').toLowerCase()");
+  if (!lViewText.includes("eng-001")) fail(`(l): 'ENG-001' not found in linear-view. Got: "${lViewText.slice(0, 300)}"`);
+  if (!lViewText.includes("eng-002")) fail(`(l): 'ENG-002' not found in linear-view. Got: "${lViewText.slice(0, 300)}"`);
+  if (!lViewText.includes("eng-003")) fail(`(l): 'ENG-003' not found in linear-view. Got: "${lViewText.slice(0, 300)}"`);
+
+  // Priority sort: ENG-001 (p=1) must appear before ENG-003 (p=3)
+  const lIdx001 = lViewText.indexOf("eng-001");
+  const lIdx003 = lViewText.indexOf("eng-003");
+  if (lIdx001 >= lIdx003) fail(`(l): ENG-001 (priority=1) should appear before ENG-003 (priority=3) in linear-view`);
+  console.log("✓ (l): Linear chip → view shows seeded issues sorted by priority, hero includes count");
 
   // Screenshot ──────────────────────────────────────────────────────────
   const screenshotResult = await cdp.send<any>("Page.captureScreenshot", { format: "png" });

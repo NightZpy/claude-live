@@ -2,6 +2,12 @@ import { join } from "node:path";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 export type Instance = { dir: string; name: string };
+export type OAuthMeta = {
+  authorization_endpoint: string;
+  token_endpoint: string;
+  registration_endpoint: string;
+};
+
 export type Config = {
   language: "es" | "en" | "pt";
   port: number;
@@ -21,6 +27,13 @@ export type Config = {
   llmPaused?: boolean;
   llmDailyCap?: number;
   prsEnabled?: boolean;
+  // Linear OAuth 2.1 + PKCE fields (never expose raw values to browser)
+  linearClientId?: string;
+  linearClientSecret?: string;
+  linearOAuthMeta?: OAuthMeta;
+  linearAccessToken?: string;
+  linearRefreshToken?: string;
+  linearTokenExpiresAt?: number;
 };
 
 export const DEFAULT_CONFIG: Config = {

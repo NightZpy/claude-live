@@ -16,11 +16,19 @@ import { runLinks, enrichPRs, defaultGhRunner, type GhRunner } from "./links";
 import { runPRFetch, BUCKET_ORDER } from "./prs";
 import { enrichLinear } from "./linear";
 import { syncDeadlines } from "./deadlines";
+import { discoverOAuthMeta, registerClient, buildAuthorizeUrl, exchangeCode, clearLinearTokens } from "./linear-oauth";
+import { fetchAssignedIssues, hasLinearOAuthToken } from "./linear-issues";
 import { llmAllowed } from "./llm-gate";
 import { listProjects, projectDetail, listConversations } from "./projects";
 
 const UI_DIR = join(import.meta.dir, "../ui");
 const STATIC = new Set(["index.html", "app.js", "style.css"]);
+
+// B2: HTML-escape helper for interpolating untrusted values into HTML responses.
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
 
 const _sseControllers = new Set<ReadableStreamDefaultController<string>>();
 let _watcherStarted = false;
@@ -363,6 +371,7 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         const tokenLast4 = tokenSet ? c.slackToken!.slice(-4) : "";
         const linTokenSet = typeof c.linearToken === "string" && c.linearToken.length > 0;
         const linTokenLast4 = linTokenSet ? c.linearToken!.slice(-4) : "";
+        const linearConnected = typeof c.linearAccessToken === "string" && c.linearAccessToken.length > 0;
         return Response.json({
           language: c.language,
           port: c.port,
@@ -376,6 +385,8 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           slackTokenLast4: tokenLast4,
           linearTokenSet: linTokenSet,
           linearTokenLast4: linTokenLast4,
+          linearConnected,
+          // linearAccessToken, linearRefreshToken, linearClientSecret — NEVER exposed
           instances: c.instances,
           detectedInstances: detectInstances(homedir()),
           mentionName: c.mentionName ?? "",
@@ -474,6 +485,7 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         const tokenLast4 = tokenSet ? c.slackToken!.slice(-4) : "";
         const linTokenSet = typeof c.linearToken === "string" && c.linearToken.length > 0;
         const linTokenLast4 = linTokenSet ? c.linearToken!.slice(-4) : "";
+        const linearConnected = typeof c.linearAccessToken === "string" && c.linearAccessToken.length > 0;
         return Response.json({
           language: c.language,
           port: c.port,
@@ -487,6 +499,7 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           slackTokenLast4: tokenLast4,
           linearTokenSet: linTokenSet,
           linearTokenLast4: linTokenLast4,
+          linearConnected,
           instances: c.instances,
           detectedInstances: detectInstances(homedir()),
           mentionName: c.mentionName ?? "",
@@ -567,18 +580,102 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         db.run("UPDATE deadlines SET status = 'dismissed', updated_at = ? WHERE id = ?", [Date.now(), id]);
         return Response.json({ ok: true });
       }
+      // ── Linear OAuth + MCP routes ─────────────────────────────────────────────
+      if (url.pathname === "/api/linear/connect" && req.method === "GET") {
+        const freshCfg = loadConfig();
+        const port = opts.port ?? Number(process.env.PORT ?? freshCfg.port);
+        try {
+          let clientId = freshCfg.linearClientId;
+          let meta = freshCfg.linearOAuthMeta;
+          if (!meta || !clientId) {
+            meta = await discoverOAuthMeta();
+            await registerClient(meta, port);
+            const updated = loadConfig();
+            clientId = updated.linearClientId;
+          }
+          if (!clientId || !meta) return Response.json({ error: "discovery_failed" }, { status: 502 });
+          const { url: authorizeUrl } = await buildAuthorizeUrl(meta, clientId, port);
+          return Response.redirect(authorizeUrl, 302);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return Response.json({ error: "connect_failed", detail: msg }, { status: 502 });
+        }
+      }
+      if (url.pathname === "/api/linear/callback" && req.method === "GET") {
+        const code = url.searchParams.get("code");
+        const state = url.searchParams.get("state");
+        const errParam = url.searchParams.get("error");
+        if (errParam) {
+          return new Response(
+            `<html><body><p>Linear auth error: ${escHtml(errParam)}. Cierra esta pestaña.</p></body></html>`,
+            { status: 400, headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'" } }
+          );
+        }
+        if (!code || !state) return new Response("bad request", { status: 400 });
+        const freshCfg = loadConfig();
+        const port = opts.port ?? Number(process.env.PORT ?? freshCfg.port);
+        const clientId = freshCfg.linearClientId;
+        const clientSecret = freshCfg.linearClientSecret;
+        const meta = freshCfg.linearOAuthMeta;
+        if (!clientId || !meta) {
+          return new Response(
+            `<html><body><p>Error: cliente no registrado. Cierra esta pestaña e intenta de nuevo.</p></body></html>`,
+            { status: 400, headers: { "Content-Type": "text/html; charset=utf-8" } }
+          );
+        }
+        try {
+          await exchangeCode(meta, clientId, clientSecret, state, code, port);
+          return new Response(
+            `<html><body><p>Linear conectado ✓. Cierra esta pestaña.</p></body></html>`,
+            { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", "Content-Security-Policy": "default-src 'none'" } }
+          );
+        } catch {
+          return new Response(
+            `<html><body><p>Error al autorizar. Cierra esta pestaña e intenta de nuevo.</p></body></html>`,
+            { status: 400, headers: { "Content-Type": "text/html; charset=utf-8" } }
+          );
+        }
+      }
+      if (url.pathname === "/api/linear/disconnect" && req.method === "POST") {
+        clearLinearTokens();
+        return Response.json({ ok: true });
+      }
+      if (url.pathname === "/api/linear-issues" && req.method === "GET") {
+        type IssueRow = {
+          id: number; identifier: string; title: string | null; url: string | null;
+          state_name: string | null; state_type: string | null; team_key: string | null;
+          priority: number; updated_at: string | null; fetched_at: number | null;
+        };
+        const rows = db.query(
+          `SELECT * FROM linear_issues ORDER BY
+             CASE priority WHEN 0 THEN 999 ELSE priority END ASC,
+             updated_at DESC`
+        ).all() as IssueRow[];
+        return Response.json({ issues: rows, count: rows.length });
+      }
+      // ── End Linear routes ────────────────────────────────────────────────────
+
       if (url.pathname === "/api/refresh" && req.method === "POST") {
         const freshCfg = loadConfig();
         const now = Date.now();
         const runner = opts.refreshRunner ?? defaultRunner;
 
-        // 1. PRs — deterministic, zero-LLM; runs on every refresh regardless of LLM state
+        // 1a. PRs — deterministic, zero-LLM; runs on every refresh regardless of LLM state
         if (freshCfg.prsEnabled !== false) {
           const ghRunner = opts.prRunner ?? defaultGhRunner;
           try {
             await runPRFetch(db, ghRunner);
           } catch {
             // best-effort: gh not auth'd or not installed — skip silently
+          }
+        }
+
+        // 1b. Linear issues — deterministic, zero-LLM; only if OAuth token present
+        if (hasLinearOAuthToken()) {
+          try {
+            await fetchAssignedIssues(db);
+          } catch {
+            // best-effort: skip silently on any error
           }
         }
 
