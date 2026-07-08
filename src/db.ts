@@ -141,6 +141,20 @@ CREATE INDEX IF NOT EXISTS idx_mentions_resolved ON mentions(resolved, last_at);
 CREATE INDEX IF NOT EXISTS idx_links_session ON links(session_id);
 CREATE INDEX IF NOT EXISTS idx_deadlines_due ON deadlines(status, due_at);
 CREATE INDEX IF NOT EXISTS idx_prs_bucket ON prs(bucket, updated_at);
+CREATE TABLE IF NOT EXISTS linear_issues (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  identifier TEXT NOT NULL,
+  title TEXT,
+  url TEXT,
+  state_name TEXT,
+  state_type TEXT,
+  team_key TEXT,
+  priority INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT,
+  fetched_at INTEGER,
+  UNIQUE(identifier)
+);
+CREATE INDEX IF NOT EXISTS idx_linear_issues_priority ON linear_issues(priority, updated_at);
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(session_id UNINDEXED, kind UNINDEXED, content);
 `;
 

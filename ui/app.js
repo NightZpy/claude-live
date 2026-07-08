@@ -79,6 +79,12 @@ const I18N = {
     sess_show_empty: "Ver vacías",
     sess_archived_hidden: "%n% archivadas ocultas",
     sess_empty_hidden: "%n% vacías ocultas",
+    strip_linear: "Linear",
+    linear_rail_title: "Linear — Mis issues",
+    linear_authorize: "Autorizar Linear",
+    linear_connected: "Conectado",
+    linear_disconnect: "Desconectar",
+    linear_settings_section: "Linear (OAuth MCP)",
   },
   en: {
     sessions: "Sessions", active: "active", archived: "Archived",
@@ -156,6 +162,12 @@ const I18N = {
     sess_show_empty: "Show empty",
     sess_archived_hidden: "%n% archived hidden",
     sess_empty_hidden: "%n% empty hidden",
+    strip_linear: "Linear",
+    linear_rail_title: "Linear — My Issues",
+    linear_authorize: "Authorize Linear",
+    linear_connected: "Connected",
+    linear_disconnect: "Disconnect",
+    linear_settings_section: "Linear (OAuth MCP)",
   },
   pt: {
     sessions: "Sessões", active: "ativas", archived: "Arquivadas",
@@ -233,6 +245,12 @@ const I18N = {
     sess_show_empty: "Ver vazias",
     sess_archived_hidden: "%n% arquivadas ocultas",
     sess_empty_hidden: "%n% vazias ocultas",
+    strip_linear: "Linear",
+    linear_rail_title: "Linear — Meus issues",
+    linear_authorize: "Autorizar Linear",
+    linear_connected: "Conectado",
+    linear_disconnect: "Desconectar",
+    linear_settings_section: "Linear (OAuth MCP)",
   },
 };
 
@@ -257,6 +275,7 @@ let _lastConversations = null;  // null = not yet fetched
 let _convFilter = 'open';       // 'open' | 'resolved' | 'all'
 let _lastPRs = null;            // null = not yet fetched; { prs: [], counts: {} }
 let _prFilter = 'actionable';   // 'actionable' | 'all' | bucket name
+let _lastLinearIssues = null;   // null = not yet fetched; { issues: [], count: 0 }
 let _sessHideArchived = true;   // default: hide archived sessions
 let _sessShowEmpty = false;     // default: hide filler/empty sessions
 
@@ -494,7 +513,8 @@ function computeHeroN(projects) {
   var fromPRs = _lastPRs
     ? ((_lastPRs.counts.needs_my_review || 0) + (_lastPRs.counts.changes_requested || 0) + (_lastPRs.counts.commented_unanswered || 0))
     : 0;
-  return fromProjects + _unlinkedMentionsOpen + fromPRs;
+  var fromLinear = _lastLinearIssues ? (_lastLinearIssues.count || 0) : 0;
+  return fromProjects + _unlinkedMentionsOpen + fromPRs + fromLinear;
 }
 
 function renderHero(projects) {
@@ -538,6 +558,13 @@ function buildHeroDropdownItems(projects) {
       items.push({ proj: null, what: "⑃ " + repoNum + ": " + title, id: pr.id, kind: "pr", prBucket: pr.bucket });
     });
   }
+  // Assigned Linear issues
+  if (_lastLinearIssues && _lastLinearIssues.issues) {
+    _lastLinearIssues.issues.slice(0, 8).forEach(function(issue) {
+      var label = "Linear " + issue.identifier + ": " + (issue.title || "").slice(0, 50);
+      items.push({ proj: null, what: "◇ " + label, id: issue.id, kind: "linear" });
+    });
+  }
   return items;
 }
 
@@ -562,6 +589,8 @@ function toggleHeroDropdown(projects) {
       _heroDropdownOpen = false;
       if (el.dataset.kind === "pr") {
         openPRsView();
+      } else if (el.dataset.kind === "linear") {
+        openLinearView();
       } else if (el.dataset.unlinked === "1") {
         openConversationsView();
       } else {
@@ -1215,16 +1244,20 @@ function switchToView(mode) {
   var sessView = document.getElementById("sessions-view");
   var convView = document.getElementById("conversations-view");
   var prsView = document.getElementById("prs-view");
+  var linearView = document.getElementById("linear-view");
   var sessChip = document.getElementById("sessions-chip");
   var convChip = document.getElementById("conversations-chip");
   var prsChip = document.getElementById("prs-chip");
+  var linearChip = document.getElementById("linear-chip");
   if (projView) projView.style.display = mode === "projects" ? "" : "none";
   if (sessView) sessView.hidden = mode !== "sessions";
   if (convView) convView.hidden = mode !== "conversations";
   if (prsView) prsView.hidden = mode !== "prs";
+  if (linearView) linearView.hidden = mode !== "linear";
   if (sessChip) sessChip.classList.toggle("active", mode === "sessions");
   if (convChip) convChip.classList.toggle("active", mode === "conversations");
   if (prsChip) prsChip.classList.toggle("active", mode === "prs");
+  if (linearChip) linearChip.classList.toggle("active", mode === "linear");
   if (mode === "sessions") {
     renderSessionsView(_lastSessions.active, _lastSessions.archived);
   }
@@ -1233,6 +1266,9 @@ function switchToView(mode) {
   }
   if (mode === "prs") {
     fetchAndRenderPRs();
+  }
+  if (mode === "linear") {
+    fetchAndRenderLinear();
   }
 }
 
@@ -1490,6 +1526,83 @@ function fetchAndRenderPRs() {
 
 function openPRsView() {
   switchToView("prs");
+}
+
+// ── Linear strip ──────────────────────────────────────────────────────────
+
+// State type colours matching Linear's state types
+var LINEAR_STATE_COLORS = {
+  completed: "green", cancelled: "dim", started: "amber",
+  unstarted: "dim", backlog: "dim",
+};
+
+function updateLinearChip(issuesData) {
+  var chip = document.getElementById("linear-chip");
+  if (!chip) return;
+  var count = issuesData ? (issuesData.count || 0) : 0;
+  chip.textContent = "◇ " + (t.strip_linear || "Linear") + (count > 0 ? " " + count : "");
+}
+
+function renderLinearList(container, issuesData) {
+  var all = (issuesData && issuesData.issues) ? issuesData.issues : [];
+  var title = '<div style="padding:6px 14px 4px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--dim)">' +
+    esc(t.linear_rail_title || "Linear — My Issues") + '</div>';
+
+  if (all.length === 0) {
+    container.innerHTML = title + '<div class="dim" style="padding:8px 14px;font-size:12px">—</div>';
+    return;
+  }
+
+  var rows = all.map(function(issue) {
+    var stateType = issue.state_type || "unstarted";
+    var stateColor = LINEAR_STATE_COLORS[stateType] || "dim";
+    var stateChip = '<span class="' + esc(stateColor) + '" style="font-size:9px;padding:1px 4px;border:1px solid currentColor;border-radius:3px">' + esc(issue.state_name || stateType) + "</span>";
+    var idSpan = '<span style="font-family:monospace;font-size:11px">' + esc(issue.identifier || "") + "</span>";
+    var titleText = esc((issue.title || "").slice(0, 90));
+    var teamSpan = issue.team_key ? '<span class="dim" style="font-size:10px">' + esc(issue.team_key) + "</span>" : "";
+    var age = issue.updated_at ? '<span class="dim" style="font-size:10px">' + esc(rel(new Date(issue.updated_at).getTime())) + "</span>" : "";
+    return '<div class="frow" style="align-items:flex-start;padding:5px 14px;gap:6px;border-bottom:1px solid var(--border,#21262d);cursor:pointer" data-url="' + esc(issue.url || "") + '">' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="display:flex;align-items:center;gap:5px;margin-bottom:2px;flex-wrap:wrap">' +
+          idSpan + ' <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + titleText + "</span>" +
+        "</div>" +
+        '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">' +
+          stateChip + teamSpan + age +
+        "</div>" +
+      "</div>" +
+    "</div>";
+  }).join("");
+
+  container.innerHTML = title + rows;
+
+  // Wire click-through
+  container.querySelectorAll("[data-url]").forEach(function(el) {
+    el.addEventListener("click", function() {
+      var url = el.dataset.url;
+      if (url) window.open(url, "_blank", "noopener");
+    });
+  });
+}
+
+function fetchAndRenderLinear() {
+  var view = document.getElementById("linear-view");
+  if (!view) return;
+  view.innerHTML = '<div class="dim" style="padding:8px 14px;font-size:12px">cargando…</div>';
+  fetch("/api/linear-issues")
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (!data) return;
+      _lastLinearIssues = data;
+      updateLinearChip(data);
+      renderLinearList(view, data);
+    })
+    .catch(function() {
+      if (view) view.innerHTML = '<div class="dim" style="padding:8px 14px">error</div>';
+    });
+}
+
+function openLinearView() {
+  switchToView("linear");
 }
 
 // ── detail panel ──────────────────────────────────────────────────────────
@@ -2000,6 +2113,12 @@ function openSettings() {
       }
       var tokPlaceholder = cfg.slackTokenSet ? (t.settings_slack_token_set || "set ····") + cfg.slackTokenLast4 : "";
       var linPlaceholder = cfg.linearTokenSet ? (t.settings_slack_token_set || "set ····") + (cfg.linearTokenLast4 || "") : "";
+      var linearConnectedHtml = cfg.linearConnected
+        ? '<div class="sfield"><label>' + esc(t.linear_settings_section || "Linear (OAuth MCP)") + '</label>' +
+          '<span class="green">' + esc(t.linear_connected || "Connected") + '</span>' +
+          ' &nbsp;<button class="sbtn-clear" id="s-linear-disconnect">' + esc(t.linear_disconnect || "Disconnect") + "</button></div>"
+        : '<div class="sfield"><label>' + esc(t.linear_settings_section || "Linear (OAuth MCP)") + '</label>' +
+          '<button class="sbtn-save" id="s-linear-connect">' + esc(t.linear_authorize || "Authorize Linear") + "</button></div>";
       body.innerHTML =
         '<div class="sfield"><label>' + esc(t.settings_language || "Language") + '</label><select id="s-lang">' + langOpts + '</select></div>' +
         chk("s-notify", "settings_notify", cfg.notifyWaiting) +
@@ -2011,6 +2130,7 @@ function openSettings() {
         (instHtml ? '<div class="sfield"><label>' + esc(t.settings_instances || "Instances") + "</label>" + instHtml + "</div>" : "") +
         '<div class="sfield"><label>' + esc(t.settings_slack_token || "Slack token") + '</label><div class="stoken-row"><input type="password" id="s-token" placeholder="' + esc(tokPlaceholder) + '" value=""><button class="sbtn-clear" id="s-token-clear">' + esc(t.settings_clear || "Clear") + "</button></div></div>" +
         '<div class="sfield"><label>' + esc(t.settings_linear_token || "Linear token") + '</label><div class="stoken-row"><input type="password" id="s-lintoken" placeholder="' + esc(linPlaceholder) + '" value=""><button class="sbtn-clear" id="s-lintoken-clear">' + esc(t.settings_clear || "Clear") + "</button></div></div>" +
+        linearConnectedHtml +
         '<div class="sfield"><label>' + esc(t.settings_mention_name || "Mention name") + '</label><input type="text" id="s-mention-name" value="' + esc(cfg.mentionName || "") + '"></div>' +
         '<div class="sfield"><label>' + esc(t.settings_llm_cap || "Daily LLM cap") + '</label><input type="number" id="s-llm-cap" min="1" max="10000" value="' + esc(String(cfg.llmDailyCap != null ? cfg.llmDailyCap : 100)) + '"></div>' +
         '<button class="sbtn-save" id="s-save">' + esc(t.settings_save || "Save") + "</button>";
@@ -2023,6 +2143,20 @@ function openSettings() {
         body.querySelector("#s-lintoken").value = ""; body.querySelector("#s-lintoken").placeholder = "";
         window.__settingsLinTokenCleared = true;
       });
+      var linearConnectBtn = body.querySelector("#s-linear-connect");
+      if (linearConnectBtn) {
+        linearConnectBtn.addEventListener("click", function() {
+          window.open("/api/linear/connect", "_blank", "noopener,width=600,height=700");
+        });
+      }
+      var linearDisconnectBtn = body.querySelector("#s-linear-disconnect");
+      if (linearDisconnectBtn) {
+        linearDisconnectBtn.addEventListener("click", function() {
+          fetch("/api/linear/disconnect", { method: "POST" })
+            .then(function() { closeSettings(); openSettings(); })
+            .catch(function() {});
+        });
+      }
       body.querySelector("#s-save").addEventListener("click", saveSettings);
     })
     .catch(function() { if (body) body.innerHTML = '<div class="dim">error</div>'; });
@@ -2114,12 +2248,13 @@ function showToast(msg) {
 // ── poll ──────────────────────────────────────────────────────────────────
 async function poll() {
   try {
-    var [projRes, sessRes, dailyRes, convRes, prsRes] = await Promise.all([
+    var [projRes, sessRes, dailyRes, convRes, prsRes, linRes] = await Promise.all([
       fetch("/api/projects"),
       fetch("/api/sessions"),
       fetch("/api/daily"),
       fetch("/api/conversations"),
       fetch("/api/prs"),
+      fetch("/api/linear-issues"),
     ]);
     if (projRes.ok) {
       var projData = await projRes.json();
@@ -2165,13 +2300,24 @@ async function poll() {
       var prsData = await prsRes.json();
       _lastPRs = prsData;
       updatePRsChip(prsData);
-      renderHero(_lastProjects);
       // Re-render if PRs view is open
       if (viewMode === "prs") {
         var prsViewEl = document.getElementById("prs-view");
         if (prsViewEl) renderPRsList(prsViewEl, prsData, _prFilter);
       }
     }
+    if (linRes && linRes.ok) {
+      var linData = await linRes.json();
+      _lastLinearIssues = linData;
+      updateLinearChip(linData);
+      // Re-render if Linear view is open
+      if (viewMode === "linear") {
+        var linViewEl = document.getElementById("linear-view");
+        if (linViewEl) renderLinearList(linViewEl, linData);
+      }
+    }
+    // Always update hero after all data collected
+    renderHero(_lastProjects);
     // Invalidate project detail cache on each poll
     _projectDetailCache.clear();
   } catch (_) {}
@@ -2246,6 +2392,15 @@ document.addEventListener("DOMContentLoaded", function() {
     prsChipEl.addEventListener("click", function() {
       if (viewMode === "prs") switchToView("projects");
       else openPRsView();
+    });
+  }
+
+  // Linear chip
+  var linearChipEl = document.getElementById("linear-chip");
+  if (linearChipEl) {
+    linearChipEl.addEventListener("click", function() {
+      if (viewMode === "linear") switchToView("projects");
+      else openLinearView();
     });
   }
 
