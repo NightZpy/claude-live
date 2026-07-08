@@ -120,11 +120,27 @@ CREATE TABLE IF NOT EXISTS llm_calls (
   duration_ms INTEGER,
   ok INTEGER
 );
+CREATE TABLE IF NOT EXISTS prs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  title TEXT,
+  url TEXT,
+  author TEXT,
+  bucket TEXT NOT NULL,
+  is_draft INTEGER NOT NULL DEFAULT 0,
+  review_decision TEXT,
+  checks TEXT,
+  updated_at TEXT,
+  fetched_at INTEGER,
+  UNIQUE(repo, number)
+);
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status, last_activity);
 CREATE INDEX IF NOT EXISTS idx_mentions_resolved ON mentions(resolved, last_at);
 CREATE INDEX IF NOT EXISTS idx_links_session ON links(session_id);
 CREATE INDEX IF NOT EXISTS idx_deadlines_due ON deadlines(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_prs_bucket ON prs(bucket, updated_at);
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(session_id UNINDEXED, kind UNINDEXED, content);
 `;
 

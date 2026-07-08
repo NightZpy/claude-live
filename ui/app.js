@@ -65,6 +65,16 @@ const I18N = {
     conv_filter_open: "Abiertas", conv_filter_resolved: "Respondidas", conv_filter_all: "Todas",
     conv_all_resolved: "Todo respondido",
     usage_chip_paused: "⏸ pausado",
+    strip_prs: "PRs",
+    pr_rail_title: "Pull Requests",
+    pr_needs_my_review: "Por revisar",
+    pr_reviewed_by_me: "Ya revisé",
+    pr_mine_blocked: "Míos sin poder mergear",
+    pr_mine_mergeable: "Míos mergeables",
+    pr_commented_unanswered: "Me comentaron, sin responder",
+    pr_changes_requested: "Cambios pedidos",
+    pr_filter_all: "Todos",
+    pr_filter_actionable: "Pendientes",
   },
   en: {
     sessions: "Sessions", active: "active", archived: "Archived",
@@ -128,6 +138,16 @@ const I18N = {
     conv_filter_open: "Open", conv_filter_resolved: "Resolved", conv_filter_all: "All",
     conv_all_resolved: "All resolved",
     usage_chip_paused: "⏸ paused",
+    strip_prs: "PRs",
+    pr_rail_title: "Pull Requests",
+    pr_needs_my_review: "To review",
+    pr_reviewed_by_me: "Reviewed",
+    pr_mine_blocked: "Mine, not mergeable",
+    pr_mine_mergeable: "Mine, mergeable",
+    pr_commented_unanswered: "Commented, unanswered",
+    pr_changes_requested: "Changes requested",
+    pr_filter_all: "All",
+    pr_filter_actionable: "Pending",
   },
   pt: {
     sessions: "Sessões", active: "ativas", archived: "Arquivadas",
@@ -191,6 +211,16 @@ const I18N = {
     conv_filter_open: "Abertas", conv_filter_resolved: "Respondidas", conv_filter_all: "Todas",
     conv_all_resolved: "Tudo respondido",
     usage_chip_paused: "⏸ pausado",
+    strip_prs: "PRs",
+    pr_rail_title: "Pull Requests",
+    pr_needs_my_review: "Para revisar",
+    pr_reviewed_by_me: "Já revisei",
+    pr_mine_blocked: "Meus, não mergeáveis",
+    pr_mine_mergeable: "Meus, mergeáveis",
+    pr_commented_unanswered: "Comentaram, sem resposta",
+    pr_changes_requested: "Mudanças pedidas",
+    pr_filter_all: "Todos",
+    pr_filter_actionable: "Pendentes",
   },
 };
 
@@ -213,6 +243,8 @@ let _unlinkedMentionsOpen = 0;
 let _unlinkedMentionsOpenItems = [];
 let _lastConversations = null;  // null = not yet fetched
 let _convFilter = 'open';       // 'open' | 'resolved' | 'all'
+let _lastPRs = null;            // null = not yet fetched; { prs: [], counts: {} }
+let _prFilter = 'actionable';   // 'actionable' | 'all' | bucket name
 
 // ── pure helpers (ported) ─────────────────────────────────────────────────
 function esc(s) {
@@ -433,7 +465,10 @@ function computeHeroN(projects) {
   var fromProjects = projects.reduce(function(sum, p) {
     return sum + (p.sessions_waiting || 0) + (p.blocked_tasks || 0) + (p.mentions_open || 0);
   }, 0);
-  return fromProjects + _unlinkedMentionsOpen;
+  var fromPRs = _lastPRs
+    ? ((_lastPRs.counts.needs_my_review || 0) + (_lastPRs.counts.changes_requested || 0) + (_lastPRs.counts.commented_unanswered || 0))
+    : 0;
+  return fromProjects + _unlinkedMentionsOpen + fromPRs;
 }
 
 function renderHero(projects) {
@@ -466,8 +501,17 @@ function buildHeroDropdownItems(projects) {
   // Unlinked open mentions (session_id IS NULL)
   _unlinkedMentionsOpenItems.forEach(function(m) {
     var excerpt = (m.text || "").slice(0, 40);
-    items.push({ proj: null, what: "@ " + (m.author || "") + ": " + excerpt, id: null });
+    items.push({ proj: null, what: "@ " + (m.author || "") + ": " + excerpt, id: null, kind: "mention" });
   });
+  // Actionable PRs
+  var actionableBuckets = new Set(["needs_my_review", "changes_requested", "commented_unanswered"]);
+  if (_lastPRs && _lastPRs.prs) {
+    _lastPRs.prs.filter(function(pr) { return actionableBuckets.has(pr.bucket); }).slice(0, 10).forEach(function(pr) {
+      var repoNum = (pr.repo || "").split("/").pop() + "#" + pr.number;
+      var title = (pr.title || "").slice(0, 50);
+      items.push({ proj: null, what: "⑃ " + repoNum + ": " + title, id: pr.id, kind: "pr", prBucket: pr.bucket });
+    });
+  }
   return items;
 }
 
@@ -479,7 +523,9 @@ function toggleHeroDropdown(projects) {
   if (!items.length) return;
   dd.innerHTML = items.map(function(item) {
     var projLabel = item.proj != null ? item.proj : (t.conv_no_project || "sin proyecto");
-    return '<div class="hero-item" data-key="' + (item.proj != null ? esc(item.proj) : "") + '" data-unlinked="' + (item.proj == null ? "1" : "0") + '">' +
+    return '<div class="hero-item" data-key="' + (item.proj != null ? esc(item.proj) : "") +
+      '" data-unlinked="' + (item.proj == null ? "1" : "0") +
+      '" data-kind="' + esc(item.kind || "proj") + '">' +
       '<span class="hi-proj">' + esc(projLabel) + '</span>' +
       '<span class="hi-what">' + esc(item.what) + '</span>' +
       "</div>";
@@ -488,7 +534,9 @@ function toggleHeroDropdown(projects) {
     el.addEventListener("click", function() {
       dd.hidden = true;
       _heroDropdownOpen = false;
-      if (el.dataset.unlinked === "1") {
+      if (el.dataset.kind === "pr") {
+        openPRsView();
+      } else if (el.dataset.unlinked === "1") {
         openConversationsView();
       } else {
         expandProjectByKey(el.dataset.key);
@@ -988,9 +1036,11 @@ function exitSearchMode() {
   var projView = document.getElementById("projects-view");
   var sessView = document.getElementById("sessions-view");
   var convView = document.getElementById("conversations-view");
+  var prsView2 = document.getElementById("prs-view");
   if (projView) projView.style.display = viewMode === "projects" ? "" : "none";
   if (sessView) sessView.hidden = viewMode !== "sessions";
   if (convView) convView.hidden = viewMode !== "conversations";
+  if (prsView2) prsView2.hidden = viewMode !== "prs";
 }
 
 // ── view switching ────────────────────────────────────────────────────────
@@ -999,18 +1049,25 @@ function switchToView(mode) {
   var projView = document.getElementById("projects-view");
   var sessView = document.getElementById("sessions-view");
   var convView = document.getElementById("conversations-view");
+  var prsView = document.getElementById("prs-view");
   var sessChip = document.getElementById("sessions-chip");
   var convChip = document.getElementById("conversations-chip");
+  var prsChip = document.getElementById("prs-chip");
   if (projView) projView.style.display = mode === "projects" ? "" : "none";
   if (sessView) sessView.hidden = mode !== "sessions";
   if (convView) convView.hidden = mode !== "conversations";
+  if (prsView) prsView.hidden = mode !== "prs";
   if (sessChip) sessChip.classList.toggle("active", mode === "sessions");
   if (convChip) convChip.classList.toggle("active", mode === "conversations");
+  if (prsChip) prsChip.classList.toggle("active", mode === "prs");
   if (mode === "sessions") {
     renderSessionsView(_lastSessions.active, _lastSessions.archived);
   }
   if (mode === "conversations") {
     fetchAndRenderConversations();
+  }
+  if (mode === "prs") {
+    fetchAndRenderPRs();
   }
 }
 
@@ -1129,6 +1186,145 @@ function wireConversationsFilter(container, allConversations) {
 
 function openConversationsView() {
   switchToView("conversations");
+}
+
+// ── PRs strip ─────────────────────────────────────────────────────────────
+var PR_BUCKET_LABELS = {
+  needs_my_review:      function() { return t.pr_needs_my_review      || "To review"; },
+  changes_requested:    function() { return t.pr_changes_requested    || "Changes requested"; },
+  commented_unanswered: function() { return t.pr_commented_unanswered || "Commented, unanswered"; },
+  mine_mergeable:       function() { return t.pr_mine_mergeable       || "Mine, mergeable"; },
+  mine_blocked:         function() { return t.pr_mine_blocked         || "Mine, not mergeable"; },
+  reviewed_by_me:       function() { return t.pr_reviewed_by_me       || "Reviewed"; },
+};
+var PR_BUCKET_ORDER = ["needs_my_review","changes_requested","mine_mergeable","mine_blocked","commented_unanswered","reviewed_by_me"];
+var PR_ACTIONABLE = new Set(["needs_my_review","changes_requested","commented_unanswered"]);
+
+var PR_BUCKET_COLORS = {
+  needs_my_review:      "amber",
+  changes_requested:    "red",
+  commented_unanswered: "amber",
+  mine_mergeable:       "green",
+  mine_blocked:         "dim",
+  reviewed_by_me:       "dim",
+};
+
+function updatePRsChip(prsData) {
+  var chip = document.getElementById("prs-chip");
+  if (!chip) return;
+  if (!prsData) { chip.textContent = "⑃ " + (t.strip_prs || "PRs"); return; }
+  var total = (prsData.prs || []).length;
+  var actionable = (prsData.prs || []).filter(function(p) { return PR_ACTIONABLE.has(p.bucket); }).length;
+  chip.textContent = "⑃ " + (t.strip_prs || "PRs") + " " + total + (actionable > 0 ? " · " + actionable + " !" : "");
+}
+
+function buildPRsFilterRow(activeFilter) {
+  var segments = [
+    { key: "actionable", label: t.pr_filter_actionable || "Pending" },
+    { key: "all",        label: t.pr_filter_all        || "All"     },
+  ].concat(PR_BUCKET_ORDER.map(function(b) {
+    return { key: b, label: PR_BUCKET_LABELS[b]() };
+  }));
+  var chips = segments.map(function(seg) {
+    return '<span class="ev-chip' + (activeFilter === seg.key ? " active" : "") +
+      '" data-pr-filter="' + esc(seg.key) + '">' + esc(seg.label) + "</span>";
+  }).join("");
+  return '<div class="ev-filter-row" style="flex-wrap:wrap">' + chips + "</div>";
+}
+
+function renderPRsList(container, prsData, filter) {
+  var all = (prsData && prsData.prs) ? prsData.prs : [];
+  var filterRow = buildPRsFilterRow(filter);
+
+  var filtered;
+  if (filter === "actionable") {
+    filtered = all.filter(function(p) { return PR_ACTIONABLE.has(p.bucket); });
+  } else if (filter === "all") {
+    filtered = all;
+  } else {
+    filtered = all.filter(function(p) { return p.bucket === filter; });
+  }
+
+  if (filtered.length === 0) {
+    container.innerHTML = filterRow + '<div class="dim" style="padding:8px 14px;font-size:12px">—</div>';
+    wirePRsFilter(container, prsData);
+    return;
+  }
+
+  // Group by bucket in order
+  var grouped = {};
+  PR_BUCKET_ORDER.forEach(function(b) { grouped[b] = []; });
+  filtered.forEach(function(p) { if (grouped[p.bucket]) grouped[p.bucket].push(p); });
+
+  var rows = "";
+  PR_BUCKET_ORDER.forEach(function(b) {
+    var grp = grouped[b];
+    if (!grp.length) return;
+    var color = PR_BUCKET_COLORS[b] || "dim";
+    rows += '<div style="padding:4px 14px 2px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em" class="' + esc(color) + '">' + esc(PR_BUCKET_LABELS[b]()) + '</div>';
+    grp.forEach(function(pr) {
+      var repoNum = '<span style="font-family:monospace;font-size:11px">' + esc((pr.repo || "").split("/").pop() + "#" + pr.number) + "</span>";
+      var title = esc((pr.title || "").slice(0, 90));
+      var author = pr.author ? '<span class="dim" style="font-size:10px">' + esc(pr.author) + "</span>" : "";
+      var checksBadge = pr.checks === "success" ? '<span class="green" style="font-size:9px">✓ CI</span>'
+        : pr.checks === "failing" ? '<span class="red" style="font-size:9px">✗ CI</span>'
+        : pr.checks === "pending" ? '<span class="amber" style="font-size:9px">⏳ CI</span>' : "";
+      var draftBadge = pr.is_draft ? '<span class="dim" style="font-size:9px">draft</span>' : "";
+      var bucketChip = '<span class="' + esc(color) + '" style="font-size:9px;padding:1px 4px;border:1px solid currentColor;border-radius:3px">' + esc(PR_BUCKET_LABELS[b]()) + "</span>";
+      var age = pr.updated_at ? '<span class="dim" style="font-size:10px">' + esc(rel(new Date(pr.updated_at).getTime())) + "</span>" : "";
+      rows += '<div class="frow" style="align-items:flex-start;padding:5px 14px;gap:6px;border-bottom:1px solid var(--border,#21262d);cursor:pointer" data-url="' + esc(pr.url || "") + '">' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="display:flex;align-items:center;gap:5px;margin-bottom:2px;flex-wrap:wrap">' +
+            repoNum + ' <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + title + "</span>" +
+          "</div>" +
+          '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">' +
+            author + bucketChip + draftBadge + checksBadge + age +
+          "</div>" +
+        "</div>" +
+      "</div>";
+    });
+  });
+
+  container.innerHTML = filterRow + rows;
+  wirePRsFilter(container, prsData);
+
+  // Wire click-through for PR rows
+  container.querySelectorAll("[data-url]").forEach(function(el) {
+    el.addEventListener("click", function() {
+      var url = el.dataset.url;
+      if (url) window.open(url, "_blank", "noopener");
+    });
+  });
+}
+
+function wirePRsFilter(container, prsData) {
+  container.querySelectorAll("[data-pr-filter]").forEach(function(chip) {
+    chip.addEventListener("click", function() {
+      _prFilter = chip.dataset.prFilter;
+      renderPRsList(container, prsData || _lastPRs, _prFilter);
+    });
+  });
+}
+
+function fetchAndRenderPRs() {
+  var view = document.getElementById("prs-view");
+  if (!view) return;
+  view.innerHTML = '<div class="dim" style="padding:8px 14px;font-size:12px">cargando…</div>';
+  fetch("/api/prs")
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (!data) return;
+      _lastPRs = data;
+      updatePRsChip(data);
+      renderPRsList(view, data, _prFilter);
+    })
+    .catch(function() {
+      if (view) view.innerHTML = '<div class="dim" style="padding:8px 14px">error</div>';
+    });
+}
+
+function openPRsView() {
+  switchToView("prs");
 }
 
 // ── detail panel ──────────────────────────────────────────────────────────
@@ -1753,11 +1949,12 @@ function showToast(msg) {
 // ── poll ──────────────────────────────────────────────────────────────────
 async function poll() {
   try {
-    var [projRes, sessRes, dailyRes, convRes] = await Promise.all([
+    var [projRes, sessRes, dailyRes, convRes, prsRes] = await Promise.all([
       fetch("/api/projects"),
       fetch("/api/sessions"),
       fetch("/api/daily"),
       fetch("/api/conversations"),
+      fetch("/api/prs"),
     ]);
     if (projRes.ok) {
       var projData = await projRes.json();
@@ -1795,6 +1992,17 @@ async function poll() {
       if (viewMode === "conversations") {
         var convView = document.getElementById("conversations-view");
         if (convView) renderConversationsList(convView, _lastConversations);
+      }
+    }
+    if (prsRes.ok) {
+      var prsData = await prsRes.json();
+      _lastPRs = prsData;
+      updatePRsChip(prsData);
+      renderHero(_lastProjects);
+      // Re-render if PRs view is open
+      if (viewMode === "prs") {
+        var prsViewEl = document.getElementById("prs-view");
+        if (prsViewEl) renderPRsList(prsViewEl, prsData, _prFilter);
       }
     }
     // Invalidate project detail cache on each poll
@@ -1862,6 +2070,15 @@ document.addEventListener("DOMContentLoaded", function() {
     convChipEl.addEventListener("click", function() {
       if (viewMode === "conversations") switchToView("projects");
       else openConversationsView();
+    });
+  }
+
+  // PRs chip
+  var prsChipEl = document.getElementById("prs-chip");
+  if (prsChipEl) {
+    prsChipEl.addEventListener("click", function() {
+      if (viewMode === "prs") switchToView("projects");
+      else openPRsView();
     });
   }
 

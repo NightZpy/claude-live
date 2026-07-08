@@ -20,6 +20,7 @@ export type Config = {
   mentionName?: string;
   llmPaused?: boolean;
   llmDailyCap?: number;
+  prsEnabled?: boolean;
 };
 
 export const DEFAULT_CONFIG: Config = {
