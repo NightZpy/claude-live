@@ -1161,7 +1161,7 @@ test("/api/sessions includes open_tasks, blocked_tasks, link_count, is_filler pe
   );
   db.run("INSERT INTO tasks (session_id, title, status, opened_at) VALUES (?,?,?,?)", ["enrich-s3", "Finish review", "open", now - 200000]);
 
-  // Session with null summary, no tasks, no links, no mentions — IS filler
+  // Session with null summary, no tasks, no links, no mentions — NOT filler (unknown ≠ empty)
   db.run(
     "INSERT INTO sessions (id, instance, status, cwd, started_at, last_activity) VALUES (?,?,?,?,?,?)",
     ["enrich-s4", "test", "running", "/p/d", now - 90000, now - 30000]
@@ -1188,10 +1188,10 @@ test("/api/sessions includes open_tasks, blocked_tasks, link_count, is_filler pe
   expect(s2.link_count).toBe(0);
   expect(s2.is_filler).toBe(1); // SQLite boolean: 1 = true
 
-  // enrich-s4: filler (null summary, no tasks, no links, no mentions)
+  // enrich-s4: NOT filler (null summary = unknown, not empty/filler)
   const s4 = body.active.find((s: any) => s.id === "enrich-s4");
   expect(s4).toBeDefined();
-  expect(s4.is_filler).toBe(1);
+  expect(s4.is_filler).toBe(0);
 
   // enrich-s3: in archived, has open task, not filler
   const s3 = body.archived.find((s: any) => s.id === "enrich-s3");
@@ -1218,5 +1218,61 @@ test("/api/sessions: session with a task is NOT filler even if summary matches f
   const s = body.active.find((s: any) => s.id === "enrich-task-filler");
   expect(s).toBeDefined();
   expect(s.is_filler).toBe(0); // has a task → not filler
+  srv.stop();
+});
+
+// --- is_filler regression tests (FIX A blocker) ---
+
+test("/api/sessions: RUNNING session with file_count>0 and NULL summary is NOT filler (blocker repro)", async () => {
+  const db = openDb(":memory:");
+  const now = Date.now();
+  db.run(
+    "INSERT INTO sessions (id, instance, status, cwd, started_at, last_activity) VALUES (?,?,?,?,?,?)",
+    ["filler-blocker", "test", "running", "/p/x", now - 60000, now]
+    // NULL summary, no tasks, no links, no mentions
+  );
+  // Has a real file edit → must NOT be hidden as filler
+  db.run("INSERT INTO session_files (session_id, path, change_kind, ts) VALUES (?,?,?,?)", ["filler-blocker", "/p/x/main.ts", "Edit", now]);
+
+  const srv = createServer(db, { port: 0 });
+  const body = await (await fetch(`http://127.0.0.1:${srv.port}/api/sessions`)).json() as any;
+  const s = body.active.find((s: any) => s.id === "filler-blocker");
+  expect(s).toBeDefined();
+  expect(s.file_count).toBe(1);
+  expect(s.is_filler).toBe(0); // file activity → NOT filler even with NULL summary
+  srv.stop();
+});
+
+test("/api/sessions: waiting_input session with NULL summary and zero signals is NOT filler", async () => {
+  const db = openDb(":memory:");
+  const now = Date.now();
+  db.run(
+    "INSERT INTO sessions (id, instance, status, cwd, started_at, last_activity, waiting_since) VALUES (?,?,?,?,?,?,?)",
+    ["filler-wait", "test", "waiting_input", "/p/y", now - 60000, now, now - 5000]
+    // NULL summary, no tasks, no links, no mentions, no files
+  );
+
+  const srv = createServer(db, { port: 0 });
+  const body = await (await fetch(`http://127.0.0.1:${srv.port}/api/sessions`)).json() as any;
+  const s = body.active.find((s: any) => s.id === "filler-wait");
+  expect(s).toBeDefined();
+  expect(s.is_filler).toBe(0); // waiting_input always needs attention → NOT filler
+  srv.stop();
+});
+
+test("/api/sessions: session with literal filler summary and zero signals IS filler", async () => {
+  const db = openDb(":memory:");
+  const now = Date.now();
+  db.run(
+    "INSERT INTO sessions (id, instance, status, cwd, started_at, last_activity, summary) VALUES (?,?,?,?,?,?,?)",
+    ["filler-explicit", "test", "running", "/p/z", now - 60000, now, "Sesión iniciada sin tarea definida — aguardando indicación"]
+    // explicit filler phrase, no tasks, no links, no mentions, no files
+  );
+
+  const srv = createServer(db, { port: 0 });
+  const body = await (await fetch(`http://127.0.0.1:${srv.port}/api/sessions`)).json() as any;
+  const s = body.active.find((s: any) => s.id === "filler-explicit");
+  expect(s).toBeDefined();
+  expect(s.is_filler).toBe(1); // explicit filler phrase + zero activity → IS filler
   srv.stop();
 });

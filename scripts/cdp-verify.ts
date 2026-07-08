@@ -178,7 +178,16 @@ try {
   // proj: filler session (no task, filler summary — should be hidden by default in sessions view)
   await seed("cdp-s-filler", { hook_event_name: "SessionStart", source: "startup" }, tmp);
 
-  console.log("Seeded hook events for proj (wait/run/arch/filler) and proj2.");
+  // proj: active session with real file edit but NULL summary — blocker regression path (FIX A)
+  // must be VISIBLE by default (not hidden as filler) despite having no summary
+  await seed("cdp-s-active-file", { hook_event_name: "SessionStart", source: "startup" }, tmp);
+  await seed("cdp-s-active-file", {
+    hook_event_name: "PostToolUse",
+    tool_name: "Edit",
+    tool_input: { file_path: "/Users/u/proj/src/active-blocker.ts", old_string: "a", new_string: "b" },
+  }, tmp);
+
+  console.log("Seeded hook events for proj (wait/run/arch/filler/active-file) and proj2.");
 
   // 1b. Direct DB seeding ────────────────────────────────────────────────
   const seedDb = new Database(join(tmp, "claude-live.db"), { readwrite: true });
@@ -306,8 +315,14 @@ try {
     ["cdp-filler-test", "Sesión iniciada sin tarea definida — aguardando indicación", "cdp-s-filler"],
   );
 
+  // Active-file session: real file edit, NULL summary (no tasks/links) — must be VISIBLE by default (FIX A blocker)
+  seedDb.run(
+    "UPDATE sessions SET name = ? WHERE id = ?",
+    ["cdp-active-file-test", "cdp-s-active-file"],
+  );
+
   seedDb.close();
-  console.log("DB seeded: summary, tasks, mention, PR link, daily, unlinked mention, PRs, filler session for", todayDate);
+  console.log("DB seeded: summary, tasks, mention, PR link, daily, unlinked mention, PRs, filler/active-file sessions for", todayDate);
 
   // 2. Start server ─────────────────────────────────────────────────────
   console.log(`Starting server on port ${SERVER_PORT}...`);
@@ -526,6 +541,11 @@ try {
   const hSessText = await evaluate(cdp, "(document.getElementById('sessions-view')?.textContent || '').toLowerCase()");
   if (hSessText.includes("cdp-filler-test")) fail("(h.2): filler session 'cdp-filler-test' appeared in sessions view when hidden by default");
   console.log("✓ (h.2): filler session hidden by default");
+
+  // (h.2b) Active session with real file edit and NULL summary must be VISIBLE by default (FIX A blocker repro)
+  const hActiveFileRow = await evaluate(cdp, "!!document.querySelector('#sessions-view .srow[data-id=\"cdp-s-active-file\"]')");
+  if (!hActiveFileRow) fail("(h.2b): active session 'cdp-s-active-file' (file edit, NULL summary) not visible — is_filler wrongly hid it");
+  console.log("✓ (h.2b): active session with file edit and null summary is visible (not hidden as filler)");
 
   // (h.3) Archived session should be hidden by default (no srow for cdp-s-arch visible)
   const hArchRowsDefault = await evaluate(cdp, "!!document.querySelector('#sessions-view .srow[data-id=\"cdp-s-arch\"]')");

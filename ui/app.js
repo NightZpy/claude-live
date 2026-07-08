@@ -1055,7 +1055,9 @@ function renderSessionsView(active, archived) {
 
   var shownActive = _sessShowEmpty ? nonWorkerActive : realActive;
   var shownArchived = _sessShowEmpty ? nonWorkerArchived : realArchived;
-  var hiddenFillerCount = _sessShowEmpty ? 0 : (fillerActive.length + fillerArchived.length);
+  // FIX B: count only filler sessions the "ver vacías" toggle alone would reveal given the current
+  // archived-toggle state — when archived are hidden, only fillerActive counts; otherwise both.
+  var hiddenFillerCount = _sessShowEmpty ? 0 : (_sessHideArchived ? fillerActive.length : fillerActive.length + fillerArchived.length);
 
   // Build toggle controls
   var archHiddenCount = nonWorkerArchived.length;
@@ -1065,14 +1067,14 @@ function renderSessionsView(active, archived) {
         '<input type="checkbox" id="sess-hide-arch-chk"' + (_sessHideArchived ? " checked" : "") + '> ' +
         esc(t.sess_hide_archived || "Ocultar archivadas") +
         (_sessHideArchived && archHiddenCount > 0
-          ? ' <span class="dim sess-hidden-count">(' + archHiddenCount + ')</span>'
+          ? ' <span class="dim sess-hidden-count">' + (t.sess_archived_hidden || "%n% archived hidden").replace('%n%', archHiddenCount) + '</span>'
           : "") +
       '</label>' +
       '<label class="sess-toggle">' +
         '<input type="checkbox" id="sess-show-empty-chk"' + (_sessShowEmpty ? " checked" : "") + '> ' +
         esc(t.sess_show_empty || "Ver vacías") +
         (!_sessShowEmpty && hiddenFillerCount > 0
-          ? ' <span class="dim sess-hidden-count">(' + hiddenFillerCount + ')</span>'
+          ? ' <span class="dim sess-hidden-count">' + (t.sess_empty_hidden || "%n% empty hidden").replace('%n%', hiddenFillerCount) + '</span>'
           : "") +
       '</label>' +
     '</div>';

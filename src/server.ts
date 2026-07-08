@@ -43,31 +43,37 @@ function _ensureWatcher() {
   }
 }
 
-const SESSION_SIGNALS_SQL = `
+const INNER_SIGNALS_SQL = `
     (SELECT COUNT(*) FROM session_files f WHERE f.session_id = s.id) AS file_count,
     (SELECT COUNT(*) FROM mentions m WHERE m.session_id = s.id AND m.resolved = 0 AND (m.resolved_manual IS NULL OR m.resolved_manual = 0)) AS mentions_open,
     (SELECT COUNT(*) FROM tasks t WHERE t.session_id = s.id AND t.status NOT IN ('done', 'blocked')) AS open_tasks,
     (SELECT COUNT(*) FROM tasks t WHERE t.session_id = s.id AND t.status = 'blocked') AS blocked_tasks,
-    (SELECT COUNT(*) FROM links l WHERE l.session_id = s.id AND l.kind IN ('pr', 'linear')) AS link_count,
-    CASE WHEN
-      (SELECT COUNT(*) FROM tasks t WHERE t.session_id = s.id) = 0
-      AND (SELECT COUNT(*) FROM links l WHERE l.session_id = s.id) = 0
-      AND (SELECT COUNT(*) FROM mentions m WHERE m.session_id = s.id AND m.resolved = 0 AND (m.resolved_manual IS NULL OR m.resolved_manual = 0)) = 0
-      AND (s.summary IS NULL OR s.summary = ''
-           OR LOWER(s.summary) LIKE '%sin tarea%'
-           OR LOWER(s.summary) LIKE '%aguardando indicaci%'
-           OR LOWER(s.summary) LIKE '%awaiting user%'
-           OR LOWER(s.summary) LIKE '%no defined task%')
+    (SELECT COUNT(*) FROM links l WHERE l.session_id = s.id AND l.kind IN ('pr', 'linear')) AS link_count`;
+// is_filler requires an EXPLICIT filler phrase AND zero real activity (including zero file edits).
+// A NULL/empty summary is never filler — unknown != empty.
+// waiting_input sessions always need attention and are never filler.
+const FILLER_CASE_SQL = `CASE WHEN
+      open_tasks = 0 AND blocked_tasks = 0 AND link_count = 0 AND mentions_open = 0 AND file_count = 0
+      AND status != 'waiting_input'
+      AND summary IS NOT NULL AND summary != ''
+      AND (LOWER(summary) LIKE '%sin tarea%'
+           OR LOWER(summary) LIKE '%aguardando indicaci%'
+           OR LOWER(summary) LIKE '%awaiting user%'
+           OR LOWER(summary) LIKE '%no defined task%')
     THEN 1 ELSE 0 END AS is_filler`;
 const ACTIVE_SQL = `
-  SELECT s.*,
-    ${SESSION_SIGNALS_SQL}
-  FROM sessions s WHERE s.status != 'archived'
-  ORDER BY CASE s.status WHEN 'waiting_input' THEN 0 WHEN 'running' THEN 1 ELSE 2 END, s.last_activity DESC`;
+  SELECT *, ${FILLER_CASE_SQL}
+  FROM (
+    SELECT s.*, ${INNER_SIGNALS_SQL}
+    FROM sessions s WHERE s.status != 'archived'
+  )
+  ORDER BY CASE status WHEN 'waiting_input' THEN 0 WHEN 'running' THEN 1 ELSE 2 END, last_activity DESC`;
 const ARCHIVED_SQL = `
-  SELECT s.*,
-    ${SESSION_SIGNALS_SQL}
-  FROM sessions s WHERE s.status = 'archived' ORDER BY s.ended_at DESC LIMIT 50`;
+  SELECT *, ${FILLER_CASE_SQL}
+  FROM (
+    SELECT s.*, ${INNER_SIGNALS_SQL}
+    FROM sessions s WHERE s.status = 'archived' ORDER BY s.ended_at DESC LIMIT 50
+  )`;
 const INBOX_MENTIONS_SQL = `
   SELECT m.*, s.name AS session_name
   FROM mentions m LEFT JOIN sessions s ON s.id = m.session_id
