@@ -175,7 +175,19 @@ try {
   await seed("cdp-s-proj2", { hook_event_name: "SessionStart", source: "startup", cwd: "/Users/u/proj2" }, tmp);
   await seed("cdp-s-proj2", { hook_event_name: "UserPromptSubmit", prompt: "work on proj2 feature", cwd: "/Users/u/proj2" }, tmp);
 
-  console.log("Seeded hook events for proj (wait/run/arch) and proj2.");
+  // proj: filler session (no task, filler summary — should be hidden by default in sessions view)
+  await seed("cdp-s-filler", { hook_event_name: "SessionStart", source: "startup" }, tmp);
+
+  // proj: active session with real file edit but NULL summary — blocker regression path (FIX A)
+  // must be VISIBLE by default (not hidden as filler) despite having no summary
+  await seed("cdp-s-active-file", { hook_event_name: "SessionStart", source: "startup" }, tmp);
+  await seed("cdp-s-active-file", {
+    hook_event_name: "PostToolUse",
+    tool_name: "Edit",
+    tool_input: { file_path: "/Users/u/proj/src/active-blocker.ts", old_string: "a", new_string: "b" },
+  }, tmp);
+
+  console.log("Seeded hook events for proj (wait/run/arch/filler/active-file) and proj2.");
 
   // 1b. Direct DB seeding ────────────────────────────────────────────────
   const seedDb = new Database(join(tmp, "claude-live.db"), { readwrite: true });
@@ -291,8 +303,26 @@ try {
     );
   }
 
+  // Give archived session a real summary so it's not a filler (has content to show)
+  seedDb.run(
+    "UPDATE sessions SET summary = ? WHERE id = ?",
+    ["Fixed the login bug and deployed to staging", "cdp-s-arch"],
+  );
+
+  // Filler session: filler summary, no tasks, no links — must be hidden by default in sessions view
+  seedDb.run(
+    "UPDATE sessions SET name = ?, summary = ? WHERE id = ?",
+    ["cdp-filler-test", "Sesión iniciada sin tarea definida — aguardando indicación", "cdp-s-filler"],
+  );
+
+  // Active-file session: real file edit, NULL summary (no tasks/links) — must be VISIBLE by default (FIX A blocker)
+  seedDb.run(
+    "UPDATE sessions SET name = ? WHERE id = ?",
+    ["cdp-active-file-test", "cdp-s-active-file"],
+  );
+
   seedDb.close();
-  console.log("DB seeded: summary, tasks, mention, PR link, daily, unlinked mention, PRs for", todayDate);
+  console.log("DB seeded: summary, tasks, mention, PR link, daily, unlinked mention, PRs, filler/active-file sessions for", todayDate);
 
   // 2. Start server ─────────────────────────────────────────────────────
   console.log(`Starting server on port ${SERVER_PORT}...`);
@@ -493,17 +523,44 @@ try {
   await evaluate(cdp, "document.getElementById('daily-close').click()");
   await sleep(200);
 
-  // (h) Sessions chip → #sessions-view visible; archived section has archived session
+  // (h) Sessions chip → #sessions-view visible; sessions enrichment behavior
   const hChipExists = await evaluate(cdp, "!!document.getElementById('sessions-chip')");
   if (!hChipExists) fail("(h): #sessions-chip not found");
   await evaluate(cdp, "document.getElementById('sessions-chip').click()");
   await sleep(400);
   const hSessViewHidden = await evaluate(cdp, "document.getElementById('sessions-view').hidden");
   if (hSessViewHidden) fail("(h): #sessions-view still hidden after sessions-chip click");
-  // Archived list should have at least 1 row (cdp-s-arch)
-  const hArchCount = await evaluate(cdp, "document.querySelectorAll('#archived-list .srow').length");
-  if (hArchCount < 1) fail(`(h): expected ≥1 archived session row, got ${hArchCount}`);
-  console.log(`✓ (h): sessions view open, ${hArchCount} archived session(s) visible`);
+  console.log("✓ (h): sessions view opened");
+
+  // (h.1) Active session with open task should show a signal chip
+  const hTaskChipCount = await evaluate(cdp, "document.querySelectorAll('#sessions-view .sig-chip').length");
+  if (hTaskChipCount < 1) fail(`(h.1): expected ≥1 .sig-chip for active-with-task session, got ${hTaskChipCount}`);
+  console.log(`✓ (h.1): sessions view shows ${hTaskChipCount} signal chip(s) for active sessions`);
+
+  // (h.2) Filler session should be hidden by default
+  const hSessText = await evaluate(cdp, "(document.getElementById('sessions-view')?.textContent || '').toLowerCase()");
+  if (hSessText.includes("cdp-filler-test")) fail("(h.2): filler session 'cdp-filler-test' appeared in sessions view when hidden by default");
+  console.log("✓ (h.2): filler session hidden by default");
+
+  // (h.2b) Active session with real file edit and NULL summary must be VISIBLE by default (FIX A blocker repro)
+  const hActiveFileRow = await evaluate(cdp, "!!document.querySelector('#sessions-view .srow[data-id=\"cdp-s-active-file\"]')");
+  if (!hActiveFileRow) fail("(h.2b): active session 'cdp-s-active-file' (file edit, NULL summary) not visible — is_filler wrongly hid it");
+  console.log("✓ (h.2b): active session with file edit and null summary is visible (not hidden as filler)");
+
+  // (h.3) Archived session should be hidden by default (no srow for cdp-s-arch visible)
+  const hArchRowsDefault = await evaluate(cdp, "!!document.querySelector('#sessions-view .srow[data-id=\"cdp-s-arch\"]')");
+  if (hArchRowsDefault) fail("(h.3): archived session cdp-s-arch visible when it should be hidden by default");
+  console.log("✓ (h.3): archived sessions hidden by default");
+
+  // (h.4) Toggle "hide archived" off → archived session appears
+  await evaluate(cdp, `(() => {
+    var chk = document.getElementById('sess-hide-arch-chk');
+    if (chk) { chk.checked = false; chk.dispatchEvent(new Event('change')); }
+  })()`);
+  await sleep(400);
+  const hArchRevealed = await evaluate(cdp, "!!document.querySelector('#sessions-view .srow[data-id=\"cdp-s-arch\"]')");
+  if (!hArchRevealed) fail("(h.4): cdp-s-arch still not visible after unchecking hide-archived");
+  console.log("✓ (h.4): toggling hide-archived reveals archived session");
 
   // (i) #refresh-btn exists and is a button
   const iRefreshExists = await evaluate(cdp, "document.getElementById('refresh-btn')?.tagName === 'BUTTON'");
