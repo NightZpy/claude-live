@@ -12,7 +12,8 @@ import { generateDaily, dateKey } from "./daily";
 import { runSlack, defaultRunner as slackDefaultRunner } from "./slack";
 import { buildResumePrompt, buildResumePromptRich } from "./resume";
 import { notify, checkNotifications } from "./notify";
-import { runLinks, enrichPRs, defaultGhRunner } from "./links";
+import { runLinks, enrichPRs, defaultGhRunner, type GhRunner } from "./links";
+import { runPRFetch, BUCKET_ORDER } from "./prs";
 import { enrichLinear } from "./linear";
 import { syncDeadlines } from "./deadlines";
 import { llmAllowed } from "./llm-gate";
@@ -111,7 +112,7 @@ function llmBlockedResponse(err: unknown): Response | null {
   return null;
 }
 
-export function createServer(db: Database, opts: { port?: number; dailyRunner?: LlmRunner; refreshRunner?: LlmRunner } = {}) {
+export function createServer(db: Database, opts: { port?: number; dailyRunner?: LlmRunner; refreshRunner?: LlmRunner; prRunner?: GhRunner } = {}) {
   const cfg = loadConfig();
   const port = opts.port ?? Number(process.env.PORT ?? cfg.port);
 
@@ -309,6 +310,32 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           return Response.json({ error: "summarize_failed" }, { status: 502 });
         }
         return Response.json(db.query("SELECT * FROM sessions WHERE id = ?").get(sm[1]));
+      }
+      if (url.pathname === "/api/prs" && req.method === "GET") {
+        type PRRow = {
+          id: number; repo: string; number: number; title: string | null;
+          url: string | null; author: string | null; bucket: string;
+          is_draft: number; review_decision: string | null; checks: string | null;
+          updated_at: string | null; fetched_at: number | null;
+        };
+        const rows = db.query(
+          `SELECT * FROM prs ORDER BY
+             CASE bucket
+               WHEN 'needs_my_review'      THEN 0
+               WHEN 'changes_requested'    THEN 1
+               WHEN 'commented_unanswered' THEN 2
+               WHEN 'mine_mergeable'       THEN 3
+               WHEN 'mine_blocked'         THEN 4
+               WHEN 'reviewed_by_me'       THEN 5
+               ELSE 6
+             END, updated_at DESC`
+        ).all() as PRRow[];
+        const counts: Record<string, number> = {};
+        for (const b of BUCKET_ORDER) counts[b] = 0;
+        for (const r of rows) {
+          if (r.bucket in counts) counts[r.bucket]++;
+        }
+        return Response.json({ prs: rows, counts });
       }
       if (url.pathname === "/api/config" && req.method === "GET") {
         const c = loadConfig();
@@ -582,7 +609,17 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           }
         }
 
-        // 4. Daily (only if ?daily=1)
+        // 4. PRs (if prsEnabled and gh is authenticated)
+        if (freshCfg.prsEnabled !== false) {
+          const ghRunner = opts.prRunner ?? defaultGhRunner;
+          try {
+            await runPRFetch(db, ghRunner);
+          } catch {
+            // best-effort: gh not auth'd or not installed — skip silently
+          }
+        }
+
+        // 5. Daily (only if ?daily=1)
         if (url.searchParams.get("daily") === "1") {
           try {
             const result = await generateDaily(db, runner, freshCfg.language, now, freshCfg);

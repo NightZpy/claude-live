@@ -1058,7 +1058,7 @@ describe("/api/config", () => {
 
   test("POST /api/refresh normal: returns correct shape with blocked:null", async () => {
     const db = openDb(":memory:");
-    const srv = createServer(db, { port: 0 });
+    const srv = createServer(db, { port: 0, prRunner: async () => "[]" });
     try {
       const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh`, { method: "POST" });
       expect(res.status).toBe(200);
@@ -1078,7 +1078,7 @@ describe("/api/config", () => {
   test("POST /api/refresh?daily=1: response includes daily field", async () => {
     const db = openDb(":memory:");
     const fakeRunner = async () => '{"es":{"yesterday":"- y","today":"- t","blockers":""},"en":{"yesterday":"- ye","today":"- te","blockers":""}}';
-    const srv = createServer(db, { port: 0, refreshRunner: fakeRunner });
+    const srv = createServer(db, { port: 0, refreshRunner: fakeRunner, prRunner: async () => "[]" });
     try {
       const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh?daily=1`, { method: "POST" });
       expect(res.status).toBe(200);
@@ -1092,7 +1092,7 @@ describe("/api/config", () => {
 
   test("POST /api/refresh llm_calls_used is >= 0", async () => {
     const db = openDb(":memory:");
-    const srv = createServer(db, { port: 0 });
+    const srv = createServer(db, { port: 0, prRunner: async () => "[]" });
     try {
       const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh`, { method: "POST" });
       const body = await res.json() as any;

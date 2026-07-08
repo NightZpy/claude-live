@@ -269,8 +269,30 @@ try {
     ],
   );
 
+  // PRs for assertion (k): one per bucket
+  const prBuckets: Array<[number, string, string, string]> = [
+    [101, "needs_my_review",      "cdptest-needs-review",   "alice"],
+    [102, "changes_requested",    "cdptest-changes-req",    "octocat"],
+    [103, "commented_unanswered", "cdptest-unanswered",     "bob"],
+    [104, "mine_mergeable",       "cdptest-mergeable",      "octocat"],
+    [105, "mine_blocked",         "cdptest-blocked",        "octocat"],
+    [106, "reviewed_by_me",       "cdptest-reviewed",       "carol"],
+  ];
+  for (const [num, bucket, title, author] of prBuckets) {
+    seedDb.run(
+      `INSERT OR IGNORE INTO prs
+         (repo, number, title, url, author, bucket, is_draft, review_decision, checks, updated_at, fetched_at)
+       VALUES (?,?,?,?,?,?,0,NULL,NULL,?,?)`,
+      [
+        "octocat/hello-world", num, title,
+        `https://github.com/octocat/hello-world/pull/${num}`,
+        author, bucket, new Date().toISOString(), nowMs,
+      ],
+    );
+  }
+
   seedDb.close();
-  console.log("DB seeded: summary, tasks, mention, PR link, daily, unlinked mention for", todayDate);
+  console.log("DB seeded: summary, tasks, mention, PR link, daily, unlinked mention, PRs for", todayDate);
 
   // 2. Start server ─────────────────────────────────────────────────────
   console.log(`Starting server on port ${SERVER_PORT}...`);
@@ -512,6 +534,44 @@ try {
   if (!jAllText.includes("jordan")) fail(`(j): 'jordan' not found in conversations-view after switching to Todas. Got: "${jAllText.slice(0, 200)}"`);
   if (!jAllText.includes("alex")) fail(`(j): 'alex' not found in conversations-view after switching to Todas. Got: "${jAllText.slice(0, 200)}"`);
   console.log("✓ (j): conversations chip → view with seeded unlinked mention, hero includes unlinked count, filter works");
+
+  // (k) PRs chip → prs-view visible, actionable by default, hero includes actionable PRs
+  const kChipExists = await evaluate(cdp, "!!document.getElementById('prs-chip')");
+  if (!kChipExists) fail("(k): #prs-chip not found");
+  // Navigate back to projects view first to reset state
+  await evaluate(cdp, "document.getElementById('sessions-chip').click()"); // go to sessions first
+  await sleep(300);
+  await evaluate(cdp, "document.getElementById('sessions-chip').click()"); // toggle off
+  await sleep(300);
+
+  // Hero should include 3 actionable PRs (needs_my_review, changes_requested, commented_unanswered)
+  const kHeroText = await evaluate(cdp, "(document.getElementById('hero')?.textContent || '').trim()");
+  const kHeroN = parseInt(kHeroText.replace(/[^0-9]/g, ""), 10);
+  // We seeded 3 actionable PRs; hero must be ≥ 3
+  if (isNaN(kHeroN) || kHeroN < 3) {
+    // tolerate "al día" only if it somehow read 0 PRs (shouldn't happen with seeded data)
+    if (!kHeroText.includes("al día") && !kHeroText.toLowerCase().includes("up to date")) {
+      fail(`(k): hero="${kHeroText}", expected ≥3 (3 actionable PRs seeded)`);
+    }
+  }
+  console.log(`✓ (k): hero includes PR count: "${kHeroText}"`);
+
+  // Click prs-chip → prs-view becomes visible
+  await evaluate(cdp, "document.getElementById('prs-chip').click()");
+  await sleep(1200);
+  const kPrsViewHidden = await evaluate(cdp, "document.getElementById('prs-view').hidden");
+  if (kPrsViewHidden) fail("(k): #prs-view still hidden after chip click");
+
+  // Default filter = actionable: needs_my_review, changes_requested, commented_unanswered should render
+  const kPrsText = await evaluate(cdp, "(document.getElementById('prs-view')?.textContent || '').toLowerCase()");
+  if (!kPrsText.includes("cdptest-needs-review")) fail(`(k): 'cdptest-needs-review' (needs_my_review) not found in prs-view. Got: "${kPrsText.slice(0, 300)}"`);
+  if (!kPrsText.includes("cdptest-changes-req")) fail(`(k): 'cdptest-changes-req' (changes_requested) not found in prs-view. Got: "${kPrsText.slice(0, 300)}"`);
+  if (!kPrsText.includes("cdptest-unanswered")) fail(`(k): 'cdptest-unanswered' (commented_unanswered) not found in prs-view. Got: "${kPrsText.slice(0, 300)}"`);
+  // Non-actionable PRs should NOT be visible with default (actionable) filter
+  if (kPrsText.includes("cdptest-mergeable")) fail(`(k): 'cdptest-mergeable' (non-actionable) appeared in default actionable filter view`);
+  if (kPrsText.includes("cdptest-blocked")) fail(`(k): 'cdptest-blocked' (non-actionable) appeared in default actionable filter view`);
+  if (kPrsText.includes("cdptest-reviewed")) fail(`(k): 'cdptest-reviewed' (non-actionable) appeared in default actionable filter view`);
+  console.log("✓ (k): PRs chip → view shows actionable buckets by default, hero includes actionable PR count");
 
   // Screenshot ──────────────────────────────────────────────────────────
   const screenshotResult = await cdp.send<any>("Page.captureScreenshot", { format: "png" });
