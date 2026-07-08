@@ -1197,7 +1197,7 @@ var PR_BUCKET_LABELS = {
   mine_blocked:         function() { return t.pr_mine_blocked         || "Mine, not mergeable"; },
   reviewed_by_me:       function() { return t.pr_reviewed_by_me       || "Reviewed"; },
 };
-var PR_BUCKET_ORDER = ["needs_my_review","changes_requested","commented_unanswered","mine_mergeable","mine_blocked","reviewed_by_me"];
+var PR_BUCKET_ORDER = ["needs_my_review","changes_requested","mine_mergeable","mine_blocked","commented_unanswered","reviewed_by_me"];
 var PR_ACTIONABLE = new Set(["needs_my_review","changes_requested","commented_unanswered"]);
 
 var PR_BUCKET_COLORS = {
