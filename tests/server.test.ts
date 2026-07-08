@@ -1125,3 +1125,98 @@ describe("/api/config", () => {
     }
   });
 });
+
+// --- /api/sessions enrichment (open_tasks, blocked_tasks, link_count, is_filler) ---
+
+test("/api/sessions includes open_tasks, blocked_tasks, link_count, is_filler per session", async () => {
+  const db = openDb(":memory:");
+  const now = Date.now();
+
+  // Session with tasks, links, mention — NOT filler
+  db.run(
+    "INSERT INTO sessions (id, instance, status, cwd, started_at, last_activity, summary) VALUES (?,?,?,?,?,?,?)",
+    ["enrich-s1", "test", "running", "/p/a", now - 60000, now, "Implementing dark mode feature"]
+  );
+  db.run("INSERT INTO tasks (session_id, title, status, opened_at) VALUES (?,?,?,?)", ["enrich-s1", "Add dark mode", "open", now - 3600000]);
+  db.run("INSERT INTO tasks (session_id, title, status, opened_at) VALUES (?,?,?,?)", ["enrich-s1", "Fix tests", "blocked", now - 7200000]);
+  db.run("INSERT INTO tasks (session_id, title, status, opened_at, closed_at) VALUES (?,?,?,?,?)", ["enrich-s1", "Write docs", "done", now - 7200000, now - 1000]);
+  db.run(
+    "INSERT INTO mentions (channel_id, thread_ts, author, text, ts, ask_count, resolved, first_at, last_at, session_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    ["C1", "ts1", "Alice", "review please", "ts1", 1, 0, now, now, "enrich-s1"]
+  );
+  db.run("INSERT INTO links (session_id, kind, ref) VALUES (?,?,?)", ["enrich-s1", "pr", "repo#42"]);
+  db.run("INSERT INTO links (session_id, kind, ref) VALUES (?,?,?)", ["enrich-s1", "linear", "CON-1"]);
+  db.run("INSERT INTO links (session_id, kind, ref) VALUES (?,?,?)", ["enrich-s1", "artifact", "/docs/note.md"]);
+
+  // Session with no tasks, no links, no mentions, filler summary — IS filler
+  db.run(
+    "INSERT INTO sessions (id, instance, status, cwd, started_at, last_activity, summary) VALUES (?,?,?,?,?,?,?)",
+    ["enrich-s2", "test", "running", "/p/b", now - 120000, now - 60000, "Sesión iniciada sin tarea definida — aguardando indicación"]
+  );
+
+  // Archived session with one open task — NOT filler
+  db.run(
+    "INSERT INTO sessions (id, instance, status, cwd, started_at, last_activity, ended_at, archived_reason, summary) VALUES (?,?,?,?,?,?,?,?,?)",
+    ["enrich-s3", "test", "archived", "/p/c", now - 500000, now - 100000, now - 100000, "exit", "Worked on feature X"]
+  );
+  db.run("INSERT INTO tasks (session_id, title, status, opened_at) VALUES (?,?,?,?)", ["enrich-s3", "Finish review", "open", now - 200000]);
+
+  // Session with null summary, no tasks, no links, no mentions — IS filler
+  db.run(
+    "INSERT INTO sessions (id, instance, status, cwd, started_at, last_activity) VALUES (?,?,?,?,?,?)",
+    ["enrich-s4", "test", "running", "/p/d", now - 90000, now - 30000]
+  );
+
+  const srv = createServer(db, { port: 0 });
+  const body = await (await fetch(`http://127.0.0.1:${srv.port}/api/sessions`)).json() as any;
+
+  // enrich-s1: non-filler, 1 open task, 1 blocked task, 1 open mention, 2 pr/linear links
+  const s1 = body.active.find((s: any) => s.id === "enrich-s1");
+  expect(s1).toBeDefined();
+  expect(s1.open_tasks).toBe(1);
+  expect(s1.blocked_tasks).toBe(1);
+  expect(s1.mentions_open).toBe(1);
+  expect(s1.link_count).toBe(2); // only pr + linear, not artifact
+  expect(s1.is_filler).toBe(0); // SQLite boolean: 0 = false
+
+  // enrich-s2: filler (filler summary, no tasks, no links, no mentions)
+  const s2 = body.active.find((s: any) => s.id === "enrich-s2");
+  expect(s2).toBeDefined();
+  expect(s2.open_tasks).toBe(0);
+  expect(s2.blocked_tasks).toBe(0);
+  expect(s2.mentions_open).toBe(0);
+  expect(s2.link_count).toBe(0);
+  expect(s2.is_filler).toBe(1); // SQLite boolean: 1 = true
+
+  // enrich-s4: filler (null summary, no tasks, no links, no mentions)
+  const s4 = body.active.find((s: any) => s.id === "enrich-s4");
+  expect(s4).toBeDefined();
+  expect(s4.is_filler).toBe(1);
+
+  // enrich-s3: in archived, has open task, not filler
+  const s3 = body.archived.find((s: any) => s.id === "enrich-s3");
+  expect(s3).toBeDefined();
+  expect(s3.open_tasks).toBe(1);
+  expect(s3.blocked_tasks).toBe(0);
+  expect(s3.is_filler).toBe(0);
+
+  srv.stop();
+});
+
+test("/api/sessions: session with a task is NOT filler even if summary matches filler pattern", async () => {
+  const db = openDb(":memory:");
+  const now = Date.now();
+  db.run(
+    "INSERT INTO sessions (id, instance, status, cwd, started_at, last_activity, summary) VALUES (?,?,?,?,?,?,?)",
+    ["enrich-task-filler", "test", "running", "/p/e", now - 60000, now, "sin tarea aguardando indicación"]
+  );
+  // has a task — NOT filler even though summary matches
+  db.run("INSERT INTO tasks (session_id, title, status, opened_at) VALUES (?,?,?,?)", ["enrich-task-filler", "Some task", "open", now - 3600000]);
+
+  const srv = createServer(db, { port: 0 });
+  const body = await (await fetch(`http://127.0.0.1:${srv.port}/api/sessions`)).json() as any;
+  const s = body.active.find((s: any) => s.id === "enrich-task-filler");
+  expect(s).toBeDefined();
+  expect(s.is_filler).toBe(0); // has a task → not filler
+  srv.stop();
+});

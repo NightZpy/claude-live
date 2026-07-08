@@ -43,16 +43,30 @@ function _ensureWatcher() {
   }
 }
 
+const SESSION_SIGNALS_SQL = `
+    (SELECT COUNT(*) FROM session_files f WHERE f.session_id = s.id) AS file_count,
+    (SELECT COUNT(*) FROM mentions m WHERE m.session_id = s.id AND m.resolved = 0 AND (m.resolved_manual IS NULL OR m.resolved_manual = 0)) AS mentions_open,
+    (SELECT COUNT(*) FROM tasks t WHERE t.session_id = s.id AND t.status NOT IN ('done', 'blocked')) AS open_tasks,
+    (SELECT COUNT(*) FROM tasks t WHERE t.session_id = s.id AND t.status = 'blocked') AS blocked_tasks,
+    (SELECT COUNT(*) FROM links l WHERE l.session_id = s.id AND l.kind IN ('pr', 'linear')) AS link_count,
+    CASE WHEN
+      (SELECT COUNT(*) FROM tasks t WHERE t.session_id = s.id) = 0
+      AND (SELECT COUNT(*) FROM links l WHERE l.session_id = s.id) = 0
+      AND (SELECT COUNT(*) FROM mentions m WHERE m.session_id = s.id AND m.resolved = 0 AND (m.resolved_manual IS NULL OR m.resolved_manual = 0)) = 0
+      AND (s.summary IS NULL OR s.summary = ''
+           OR LOWER(s.summary) LIKE '%sin tarea%'
+           OR LOWER(s.summary) LIKE '%aguardando indicaci%'
+           OR LOWER(s.summary) LIKE '%awaiting user%'
+           OR LOWER(s.summary) LIKE '%no defined task%')
+    THEN 1 ELSE 0 END AS is_filler`;
 const ACTIVE_SQL = `
   SELECT s.*,
-    (SELECT COUNT(*) FROM session_files f WHERE f.session_id = s.id) AS file_count,
-    (SELECT COUNT(*) FROM mentions m WHERE m.session_id = s.id AND m.resolved = 0 AND (m.resolved_manual IS NULL OR m.resolved_manual = 0)) AS mentions_open
+    ${SESSION_SIGNALS_SQL}
   FROM sessions s WHERE s.status != 'archived'
   ORDER BY CASE s.status WHEN 'waiting_input' THEN 0 WHEN 'running' THEN 1 ELSE 2 END, s.last_activity DESC`;
 const ARCHIVED_SQL = `
   SELECT s.*,
-    (SELECT COUNT(*) FROM session_files f WHERE f.session_id = s.id) AS file_count,
-    (SELECT COUNT(*) FROM mentions m WHERE m.session_id = s.id AND m.resolved = 0 AND (m.resolved_manual IS NULL OR m.resolved_manual = 0)) AS mentions_open
+    ${SESSION_SIGNALS_SQL}
   FROM sessions s WHERE s.status = 'archived' ORDER BY s.ended_at DESC LIMIT 50`;
 const INBOX_MENTIONS_SQL = `
   SELECT m.*, s.name AS session_name

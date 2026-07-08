@@ -422,6 +422,36 @@ html, body {
 }
 .workers-group > summary::-webkit-details-marker { display: none; }
 
+/* ── sessions view: controls, project groups, signal chips ─────────────── */
+.srow-dim { opacity: 0.5; }
+.sess-controls {
+  display: flex; gap: 16px; padding: 8px 14px;
+  border-bottom: 1px solid #161b22;
+  background: #0a0c10;
+}
+.sess-toggle {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; color: #8b949e; cursor: pointer;
+  user-select: none;
+}
+.sess-toggle input[type="checkbox"] { cursor: pointer; accent-color: #388bfd; }
+.sess-hidden-count { font-size: 10px; color: #484f58; }
+.sess-proj-group { margin-bottom: 4px; }
+.sess-proj-header {
+  font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+  color: #388bfd99; padding: 8px 14px 3px;
+}
+.sig-chips {
+  display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;
+}
+.sig-chip {
+  font-size: 10px; padding: 1px 6px;
+  border-radius: 8px; border: 1px solid #30363d;
+  color: #8b949e; white-space: nowrap;
+}
+.sig-chip.sig-amber { border-color: #d2992255; color: #d29922; }
+.sig-chip.sig-red   { border-color: #f8514955; color: #f85149; }
+
 /* ── detail panel ───────────────────────────────────────────────────────── */
 #detail:not([hidden]) {
   display: flex;

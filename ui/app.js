@@ -75,6 +75,10 @@ const I18N = {
     pr_changes_requested: "Cambios pedidos",
     pr_filter_all: "Todos",
     pr_filter_actionable: "Pendientes",
+    sess_hide_archived: "Ocultar archivadas",
+    sess_show_empty: "Ver vacías",
+    sess_archived_hidden: "%n% archivadas ocultas",
+    sess_empty_hidden: "%n% vacías ocultas",
   },
   en: {
     sessions: "Sessions", active: "active", archived: "Archived",
@@ -148,6 +152,10 @@ const I18N = {
     pr_changes_requested: "Changes requested",
     pr_filter_all: "All",
     pr_filter_actionable: "Pending",
+    sess_hide_archived: "Hide archived",
+    sess_show_empty: "Show empty",
+    sess_archived_hidden: "%n% archived hidden",
+    sess_empty_hidden: "%n% empty hidden",
   },
   pt: {
     sessions: "Sessões", active: "ativas", archived: "Arquivadas",
@@ -221,6 +229,10 @@ const I18N = {
     pr_changes_requested: "Mudanças pedidas",
     pr_filter_all: "Todos",
     pr_filter_actionable: "Pendentes",
+    sess_hide_archived: "Ocultar arquivadas",
+    sess_show_empty: "Ver vazias",
+    sess_archived_hidden: "%n% arquivadas ocultas",
+    sess_empty_hidden: "%n% vazias ocultas",
   },
 };
 
@@ -245,6 +257,8 @@ let _lastConversations = null;  // null = not yet fetched
 let _convFilter = 'open';       // 'open' | 'resolved' | 'all'
 let _lastPRs = null;            // null = not yet fetched; { prs: [], counts: {} }
 let _prFilter = 'actionable';   // 'actionable' | 'all' | bucket name
+let _sessHideArchived = true;   // default: hide archived sessions
+let _sessShowEmpty = false;     // default: hide filler/empty sessions
 
 // ── pure helpers (ported) ─────────────────────────────────────────────────
 function esc(s) {
@@ -321,6 +335,18 @@ function sysChip(label, decoded) {
 function basename(p) {
   if (!p) return "";
   return p.replace(/\/$/, "").split("/").pop() || p;
+}
+
+function projKeyForSession(s) {
+  if (s.git_repo) {
+    var parts = s.git_repo.split("/");
+    return parts[parts.length - 1] || s.git_repo;
+  }
+  if (s.cwd) {
+    var b = basename(s.cwd);
+    if (b) return b;
+  }
+  return "(sin proyecto)";
 }
 
 function relPath(filePath, cwd) {
@@ -952,28 +978,165 @@ function buildWorkersGroup(workers) {
     workers.map(buildSessionRow).join("") + "</details>";
 }
 
-function renderSessionsView(active, archived) {
-  var lblActive = document.getElementById("lbl-active");
-  var lstActive = document.getElementById("sessions-list");
-  var lblArch = document.getElementById("lbl-archived");
-  var lstArch = document.getElementById("archived-list");
-  if (!lstActive) return;
+function buildSignalChips(s) {
+  var chips = [];
+  if (s.status === "waiting_input") chips.push('<span class="sig-chip sig-amber">⏳</span>');
+  if (s.open_tasks) chips.push('<span class="sig-chip">✓' + s.open_tasks + '</span>');
+  if (s.blocked_tasks) chips.push('<span class="sig-chip sig-red">⛔' + s.blocked_tasks + '</span>');
+  if (s.mentions_open) chips.push('<span class="sig-chip">@' + s.mentions_open + '</span>');
+  if (s.link_count) chips.push('<span class="sig-chip">⑃' + s.link_count + '</span>');
+  return chips.length ? '<div class="sig-chips">' + chips.join("") + "</div>" : "";
+}
 
-  var regular = active.filter(function(s) { return s.kind !== "worker"; });
-  var workers = active.filter(function(s) { return s.kind === "worker"; });
-  var archRegular = archived.filter(function(s) { return s.kind !== "worker"; });
+function buildSessionRowEnriched(s) {
+  var displayName = s.name || basename(s.cwd) || s.id;
+  var dc = dotClass(s.status);
+  var right = "";
+  if (s.status === "waiting_input" && s.waiting_since) {
+    var wm = Math.floor((Date.now() - s.waiting_since) / 60000);
+    right = '<span class="amber">⏸ ' + wm + "m " + esc(t.waiting_you) + "</span>";
+  } else if (s.status === "archived") {
+    var dur = s.ended_at && s.started_at ? fmtDur(s.ended_at - s.started_at) : "";
+    var reason = s.archived_reason ? esc(archiveReasonLabel(s.archived_reason)) : "";
+    right = '<span class="dim">' + (reason ? reason + " · " : "") + esc(dur) + "</span>";
+  } else {
+    right = '<span class="dim">' + rel(s.last_activity) + "</span>";
+  }
+  var topicHtml = "";
+  if (s.summary) {
+    topicHtml = '<div class="topic">' + esc(s.summary.slice(0, 90)) + "</div>";
+  } else if (s.last_prompt) {
+    var dec = decodePrompt(s.last_prompt);
+    var inner = dec.kind === "system"
+      ? sysChip(dec.label, dec.text.slice(0, 90))
+      : esc(s.last_prompt.slice(0, 90));
+    topicHtml = '<div class="topic">' + inner + "</div>";
+  }
+  var kindBadge = s.kind === "worker"
+    ? '<span class="badge-kind">' + esc(t.kind_worker || "worker") + "</span>" : "";
+  var chipsHtml = buildSignalChips(s);
+  var hasSignals = s.status === "waiting_input" || s.open_tasks || s.blocked_tasks || s.mentions_open || s.link_count;
+  var rowClass = "row srow" + (hasSignals ? "" : " srow-dim");
+  return '<div class="' + rowClass + '" data-id="' + esc(s.id) + '" tabindex="0">' +
+    '<span class="dot ' + dc + '"></span>' +
+    '<div class="srow-body">' +
+      '<div class="srow-top">' +
+        '<span class="name">' + esc(displayName) + "</span>" +
+        '<span class="badge-instance tag">' + esc(s.instance || "") + "</span>" +
+        kindBadge +
+      "</div>" + topicHtml + chipsHtml +
+    "</div>" +
+    '<div class="srow-right">' + right + "</div>" +
+    "</div>";
+}
+
+function updateSessionsChip(nonFillerActive) {
+  var chip = document.getElementById("sessions-chip");
+  if (!chip) return;
+  var count = (nonFillerActive || []).length;
+  chip.textContent = (t.sessions || "Sesiones") + (count > 0 ? " · " + count : "");
+}
+
+function renderSessionsView(active, archived) {
+  var sessView = document.getElementById("sessions-view");
+  if (!sessView) return;
+
+  var nonWorkerActive = active.filter(function(s) { return s.kind !== "worker"; });
+  var workerActive = active.filter(function(s) { return s.kind === "worker"; });
+  var nonWorkerArchived = archived.filter(function(s) { return s.kind !== "worker"; });
   var archWorkers = archived.filter(function(s) { return s.kind === "worker"; });
 
-  if (lblActive) lblActive.textContent = t.sessions + " · " + active.length + " " + t.active;
-  lstActive.innerHTML = (regular.length
-    ? regular.map(buildSessionRow).join("")
-    : '<div class="row muted">' + esc(t.no_sessions) + "</div>") +
-    buildWorkersGroup(workers);
+  var fillerActive = nonWorkerActive.filter(function(s) { return s.is_filler; });
+  var realActive = nonWorkerActive.filter(function(s) { return !s.is_filler; });
+  var fillerArchived = nonWorkerArchived.filter(function(s) { return s.is_filler; });
+  var realArchived = nonWorkerArchived.filter(function(s) { return !s.is_filler; });
 
-  if (lblArch) lblArch.textContent = t.archived;
-  if (lstArch) lstArch.innerHTML = archRegular.map(buildSessionRow).join("") + buildWorkersGroup(archWorkers);
+  updateSessionsChip(realActive);
 
-  attachSrowHandlers(document.getElementById("sessions-view"));
+  var shownActive = _sessShowEmpty ? nonWorkerActive : realActive;
+  var shownArchived = _sessShowEmpty ? nonWorkerArchived : realArchived;
+  var hiddenFillerCount = _sessShowEmpty ? 0 : (fillerActive.length + fillerArchived.length);
+
+  // Build toggle controls
+  var archHiddenCount = nonWorkerArchived.length;
+  var controlsHtml =
+    '<div class="sess-controls">' +
+      '<label class="sess-toggle">' +
+        '<input type="checkbox" id="sess-hide-arch-chk"' + (_sessHideArchived ? " checked" : "") + '> ' +
+        esc(t.sess_hide_archived || "Ocultar archivadas") +
+        (_sessHideArchived && archHiddenCount > 0
+          ? ' <span class="dim sess-hidden-count">(' + archHiddenCount + ')</span>'
+          : "") +
+      '</label>' +
+      '<label class="sess-toggle">' +
+        '<input type="checkbox" id="sess-show-empty-chk"' + (_sessShowEmpty ? " checked" : "") + '> ' +
+        esc(t.sess_show_empty || "Ver vacías") +
+        (!_sessShowEmpty && hiddenFillerCount > 0
+          ? ' <span class="dim sess-hidden-count">(' + hiddenFillerCount + ')</span>'
+          : "") +
+      '</label>' +
+    '</div>';
+
+  // Group active sessions by project key
+  var groups = [];
+  var groupMap = {};
+  shownActive.forEach(function(s) {
+    var key = projKeyForSession(s);
+    if (!groupMap[key]) { groupMap[key] = []; groups.push(key); }
+    groupMap[key].push(s);
+  });
+
+  var activeHtml = "";
+  if (groups.length === 0) {
+    activeHtml = '<div class="row muted">' + esc(t.no_sessions) + "</div>";
+  } else {
+    groups.forEach(function(key) {
+      var sessions = groupMap[key];
+      sessions.sort(function(a, b) {
+        var rank = function(s) { return s.status === "waiting_input" ? 0 : s.status === "running" ? 1 : 2; };
+        var r = rank(a) - rank(b);
+        return r !== 0 ? r : (b.last_activity || 0) - (a.last_activity || 0);
+      });
+      activeHtml += '<div class="sess-proj-group">';
+      activeHtml += '<div class="sess-proj-header">' + esc(key) + "</div>";
+      sessions.forEach(function(s) { activeHtml += buildSessionRowEnriched(s); });
+      activeHtml += "</div>";
+    });
+  }
+  activeHtml += buildWorkersGroup(workerActive);
+
+  // Archived section
+  var archivedHtml = "";
+  if (!_sessHideArchived) {
+    archivedHtml =
+      '<div class="seclbl">' + esc(t.archived || "Archivadas") + ' (' + nonWorkerArchived.length + ')</div>' +
+      shownArchived.map(buildSessionRowEnriched).join("") +
+      buildWorkersGroup(archWorkers);
+  }
+
+  sessView.innerHTML =
+    controlsHtml +
+    '<div class="seclbl">' + esc(t.sessions) + " · " + realActive.length + " " + esc(t.active) + "</div>" +
+    '<div id="sessions-list">' + activeHtml + "</div>" +
+    archivedHtml;
+
+  // Wire toggle handlers
+  var hideArchChk = sessView.querySelector("#sess-hide-arch-chk");
+  if (hideArchChk) {
+    hideArchChk.addEventListener("change", function() {
+      _sessHideArchived = hideArchChk.checked;
+      renderSessionsView(_lastSessions.active, _lastSessions.archived);
+    });
+  }
+  var showEmptyChk = sessView.querySelector("#sess-show-empty-chk");
+  if (showEmptyChk) {
+    showEmptyChk.addEventListener("change", function() {
+      _sessShowEmpty = showEmptyChk.checked;
+      renderSessionsView(_lastSessions.active, _lastSessions.archived);
+    });
+  }
+
+  attachSrowHandlers(sessView);
 }
 
 function attachSrowHandlers(container) {
@@ -1971,6 +2134,8 @@ async function poll() {
       lang = sessData.language || lang;
       t = I18N[lang] || I18N.es;
       _lastSessions = { active: sessData.active || [], archived: sessData.archived || [] };
+      var _nonFillerActive = _lastSessions.active.filter(function(s) { return !s.is_filler && s.kind !== "worker"; });
+      updateSessionsChip(_nonFillerActive);
       if (viewMode === "sessions") renderSessionsView(_lastSessions.active, _lastSessions.archived);
       // Update session detail if open
       if (openId) {
