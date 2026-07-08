@@ -1036,7 +1036,8 @@ describe("/api/config", () => {
   test("POST /api/refresh when paused: blocked='paused', all counts 0, no llm calls", async () => {
     saveConfig({ ...DEFAULT_CONFIG, llmPaused: true });
     const db = openDb(":memory:");
-    const srv = createServer(db, { port: 0 });
+    // prRunner needed: FIX4 moved PR fetch above the llmAllowed gate so it runs even when paused
+    const srv = createServer(db, { port: 0, prRunner: async () => "[]" });
     try {
       const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh`, { method: "POST" });
       expect(res.status).toBe(200);

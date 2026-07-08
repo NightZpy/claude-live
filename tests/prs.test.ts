@@ -1,5 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { fetchAndClassifyPRs, persistPRs } from "../src/prs";
+import { fetchAndClassifyPRs, persistPRs, runPRFetch } from "../src/prs";
 import type { GhRunner } from "../src/links";
 import { openDb } from "../src/db";
 import { createServer } from "../src/server";
@@ -361,8 +361,194 @@ test("GET /api/prs returns prs sorted by bucket order then updated_at DESC", asy
   );
   const srv = createServer(db, { port: 0 });
   const body = await (await fetch(`http://127.0.0.1:${srv.port}/api/prs`)).json() as any;
-  // needs_my_review (bucket order 0) before mine_blocked (order 4)
+  // needs_my_review (bucket order 0) before mine_blocked (order 3)
   expect(body.prs[0].bucket).toBe("needs_my_review");
   expect(body.prs[1].bucket).toBe("mine_blocked");
   srv.stop();
+});
+
+// ── FIX 1 regression: stale PR pruning ────────────────────────────────────
+
+describe("runPRFetch: stale row pruning", () => {
+  function seedRow(db: ReturnType<typeof openDb>, n: number, bucket: string) {
+    db.run(
+      `INSERT INTO prs (repo, number, title, url, author, bucket, is_draft, review_decision, checks, updated_at, fetched_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      ["acme/api", n, `PR ${n}`, `https://github.com/acme/api/pull/${n}`, "alice", bucket, 0, null, null, "2024-01-01T00:00:00Z", 1]
+    );
+  }
+
+  test("prune stale rows: fetch returns 1 of 2 seeded rows → other deleted", async () => {
+    const db = openDb(":memory:");
+    seedRow(db, 1, "needs_my_review");
+    seedRow(db, 2, "mine_blocked");
+
+    // fetch returns only PR 1 (review-requested → needs_my_review)
+    const pr1fetch = makePR(1, { author: "alice" });
+    const detail1fetch = makeDetail({ author: "alice" });
+    const runner: GhRunner = async (args: string[]) => {
+      const cmd = args.join(" ");
+      if (cmd.includes("api") && cmd.includes("user")) return `"${ME}"`;
+      if (cmd.includes("--involves=@me")) return JSON.stringify([pr1fetch]);
+      if (cmd.includes("--review-requested=@me")) return JSON.stringify([pr1fetch]);
+      if (cmd.includes("pr view 1")) return JSON.stringify(detail1fetch);
+      return "[]";
+    };
+
+    await runPRFetch(db, runner);
+
+    const rows = db.query("SELECT * FROM prs ORDER BY number").all() as any[];
+    expect(rows.length).toBe(1);
+    expect(rows[0].number).toBe(1);
+  });
+
+  test("prune stale rows: empty result set (login OK, zero PRs) prunes all", async () => {
+    const db = openDb(":memory:");
+    seedRow(db, 1, "needs_my_review");
+    seedRow(db, 2, "mine_blocked");
+
+    const runner: GhRunner = async (args: string[]) => {
+      const cmd = args.join(" ");
+      if (cmd.includes("api") && cmd.includes("user")) return `"${ME}"`;
+      return "[]"; // zero PRs returned
+    };
+
+    await runPRFetch(db, runner);
+
+    const rows = db.query("SELECT * FROM prs").all() as any[];
+    expect(rows.length).toBe(0);
+  });
+
+  test("no prune when runner throws (gh failure) → existing rows remain", async () => {
+    const db = openDb(":memory:");
+    seedRow(db, 1, "needs_my_review");
+    seedRow(db, 2, "mine_blocked");
+
+    const runner: GhRunner = async () => {
+      throw new Error("gh: not authenticated");
+    };
+
+    await expect(runPRFetch(db, runner)).rejects.toThrow();
+
+    const rows = db.query("SELECT * FROM prs").all() as any[];
+    expect(rows.length).toBe(2);
+  });
+
+  test("no prune when login is empty → existing rows remain", async () => {
+    const db = openDb(":memory:");
+    seedRow(db, 1, "needs_my_review");
+    seedRow(db, 2, "mine_blocked");
+
+    const runner: GhRunner = async (args: string[]) => {
+      const cmd = args.join(" ");
+      if (cmd.includes("api") && cmd.includes("user")) return '""'; // empty login
+      return "[]";
+    };
+
+    await runPRFetch(db, runner);
+
+    const rows = db.query("SELECT * FROM prs").all() as any[];
+    expect(rows.length).toBe(2);
+  });
+});
+
+// ── FIX 2 regression: re-requested review ─────────────────────────────────
+
+test("FIX2: re-requested review (I reviewed before, re-requested) → needs_my_review", async () => {
+  const prX = makePR(97, { author: "alice" });
+  const detailX = makeDetail({
+    author: "alice",
+    reviews: [{ author: { login: ME }, state: "APPROVED", submittedAt: "2024-01-01T00:00:00Z" }],
+    latestReviews: [{ author: { login: ME }, state: "APPROVED" }],
+  });
+  const runner: GhRunner = async (args: string[]) => {
+    const cmd = args.join(" ");
+    if (cmd.includes("--involves=@me")) return JSON.stringify([prX]);
+    if (cmd.includes("--review-requested=@me")) return JSON.stringify([prX]); // re-requested
+    if (cmd.includes("pr view 97")) return JSON.stringify(detailX);
+    return "[]";
+  };
+  const results = await fetchAndClassifyPRs(ME, runner);
+  const pr = results.find(r => r.number === 97);
+  expect(pr).toBeDefined();
+  expect(pr!.bucket).toBe("needs_my_review");
+});
+
+// ── FIX 3 regression: commented_unanswered participation gate ─────────────
+
+test("FIX3: commented_unanswered requires my participation (not just @-mention via --involves)", async () => {
+  // I'm in --involves but I never commented or reviewed this PR
+  const prX = makePR(96, { author: "alice" });
+  const detailX = makeDetail({
+    author: "alice",
+    comments: [{ author: { login: "bob" }, createdAt: "2024-01-02T00:00:00Z" }],
+    reviews: [],
+    latestReviews: [],
+  });
+  const runner: GhRunner = async (args: string[]) => {
+    const cmd = args.join(" ");
+    if (cmd.includes("--involves=@me")) return JSON.stringify([prX]);
+    if (cmd.includes("--review-requested=@me")) return "[]";
+    if (cmd.includes("pr view 96")) return JSON.stringify(detailX);
+    return "[]";
+  };
+  const results = await fetchAndClassifyPRs(ME, runner);
+  const pr = results.find(r => r.number === 96);
+  // I never participated — must NOT be commented_unanswered
+  if (pr) expect(pr.bucket).not.toBe("commented_unanswered");
+});
+
+test("FIX3: commented_unanswered fires when I did participate and last comment is by others", async () => {
+  const prX = makePR(95, { author: "alice" });
+  const detailX = makeDetail({
+    author: "alice",
+    comments: [
+      { author: { login: ME }, createdAt: "2024-01-01T00:00:00Z" },
+      { author: { login: "alice" }, createdAt: "2024-01-02T00:00:00Z" },
+    ],
+    reviews: [],
+    latestReviews: [],
+  });
+  const runner: GhRunner = async (args: string[]) => {
+    const cmd = args.join(" ");
+    if (cmd.includes("--involves=@me")) return JSON.stringify([prX]);
+    if (cmd.includes("--review-requested=@me")) return "[]";
+    if (cmd.includes("pr view 95")) return JSON.stringify(detailX);
+    return "[]";
+  };
+  const results = await fetchAndClassifyPRs(ME, runner);
+  const pr = results.find(r => r.number === 95);
+  expect(pr).toBeDefined();
+  expect(pr!.bucket).toBe("commented_unanswered");
+});
+
+// ── FIX 4 regression: PR fetch ungated from LLM ───────────────────────────
+
+test("FIX4: PR fetch runs even when LLM cap is exceeded (blocked refresh still updates PRs)", async () => {
+  const db = openDb(":memory:");
+
+  // Exceed the default LLM daily cap (100) by inserting 101 calls for today
+  const todayTs = Date.now() - (Date.now() % 86400000) + 1000;
+  for (let i = 0; i < 101; i++) {
+    db.run("INSERT INTO llm_calls (ts, kind, model, duration_ms, ok) VALUES (?,?,?,?,?)",
+      [todayTs + i, "summarize", null, 100, 1]);
+  }
+
+  let prRunnerCalled = false;
+  const trackedPrRunner: GhRunner = async (args: string[]) => {
+    prRunnerCalled = true;
+    const cmd = args.join(" ");
+    if (cmd.includes("api") && cmd.includes("user")) return `"${ME}"`;
+    return "[]";
+  };
+
+  const srv = createServer(db, { port: 0, prRunner: trackedPrRunner });
+  const res = await fetch(`http://127.0.0.1:${srv.port}/api/refresh`, { method: "POST" });
+  const body = await res.json() as any;
+  srv.stop();
+
+  // LLM should be blocked
+  expect(body.blocked).toBe("cap");
+  // PR fetch must still have run
+  expect(prRunnerCalled).toBe(true);
 });

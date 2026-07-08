@@ -13,9 +13,9 @@ export type PRBucket =
 export const BUCKET_ORDER: PRBucket[] = [
   "needs_my_review",
   "changes_requested",
-  "commented_unanswered",
   "mine_mergeable",
   "mine_blocked",
+  "commented_unanswered",
   "reviewed_by_me",
 ];
 
@@ -82,8 +82,7 @@ function checksFromRollup(
 
 function isBot(login: string): boolean {
   if (!login) return true;
-  const lower = login.toLowerCase();
-  return lower.endsWith("[bot]") || lower.includes("-bot") || lower === "dependabot";
+  return login.toLowerCase().endsWith("[bot]");
 }
 
 function latestHumanCommentAuthor(detail: DetailPR): string | null {
@@ -109,23 +108,14 @@ function classify(
   const authorLogin = (detail.author?.login || pr.author?.login || "").toLowerCase();
   const isMine = authorLogin === me;
 
-  // 1. needs_my_review: review requested from me AND I have not submitted a review
-  if (isReviewRequested) {
-    const allMyReviews = [
-      ...(detail.reviews || []),
-      ...(detail.latestReviews || []),
-    ].filter(r => (r.author?.login ?? "").toLowerCase() === me);
-    if (allMyReviews.length === 0) return "needs_my_review";
-  }
+  // 1. needs_my_review: review explicitly requested from me (regardless of prior reviews —
+  //    GitHub only keeps this flag set while my review is actually pending)
+  if (isReviewRequested) return "needs_my_review";
 
   // 2. changes_requested: mine AND CHANGES_REQUESTED
   if (isMine && detail.reviewDecision === "CHANGES_REQUESTED") return "changes_requested";
 
-  // 3. commented_unanswered: involved AND latest human comment is not by me
-  const latestHuman = latestHumanCommentAuthor(detail);
-  if (latestHuman && latestHuman.toLowerCase() !== me) return "commented_unanswered";
-
-  // 4. mine_mergeable: mine AND not draft AND APPROVED AND all checks SUCCESS AND MERGEABLE
+  // 3. mine_mergeable: mine AND not draft AND APPROVED AND all checks SUCCESS AND MERGEABLE
   const cs = checksFromRollup(detail.statusCheckRollup);
   if (
     isMine &&
@@ -138,15 +128,25 @@ function classify(
     return "mine_mergeable";
   }
 
-  // 5. mine_blocked: mine (not already caught by changes_requested above)
+  // 4. mine_blocked: mine (not caught by changes_requested or mine_mergeable above)
   if (isMine) return "mine_blocked";
 
-  // 6. reviewed_by_me: I submitted a review on someone else's PR
+  // Determine my participation for steps 5 and 6
   const allReviews = [
     ...(detail.reviews || []),
     ...(detail.latestReviews || []),
   ];
   const iReviewed = allReviews.some(r => (r.author?.login ?? "").toLowerCase() === me);
+  const iCommented = (detail.comments || []).some(
+    c => !isBot(c.author?.login ?? "") && (c.author?.login ?? "").toLowerCase() === me
+  );
+  const iParticipated = iReviewed || iCommented;
+
+  // 5. commented_unanswered: I participated AND latest human non-bot comment is not by me
+  const latestHuman = latestHumanCommentAuthor(detail);
+  if (iParticipated && latestHuman && latestHuman.toLowerCase() !== me) return "commented_unanswered";
+
+  // 6. reviewed_by_me: I submitted a review on someone else's PR (isReviewRequested is false — step 1 returned early)
   if (!isMine && iReviewed) return "reviewed_by_me";
 
   return null;
@@ -189,7 +189,17 @@ export async function fetchAndClassifyPRs(
 
   const results: PRItem[] = [];
 
-  for (const { pr, isReviewRequested } of seen.values()) {
+  const MAX_DETAIL_FETCHES = 80;
+  let candidates = [...seen.values()];
+  if (candidates.length > MAX_DETAIL_FETCHES) {
+    const dropped = candidates.length - MAX_DETAIL_FETCHES;
+    candidates = candidates
+      .sort((a, b) => (b.pr.updatedAt > a.pr.updatedAt ? 1 : b.pr.updatedAt < a.pr.updatedAt ? -1 : 0))
+      .slice(0, MAX_DETAIL_FETCHES);
+    console.warn(`[prs] ${dropped} PR(s) beyond the ${MAX_DETAIL_FETCHES}-detail cap were skipped`);
+  }
+
+  for (const { pr, isReviewRequested } of candidates) {
     const repo = pr.repository?.nameWithOwner ?? "";
     try {
       const raw = await ghRunner([
@@ -220,8 +230,8 @@ export async function fetchAndClassifyPRs(
   return results;
 }
 
-export function persistPRs(db: Database, items: PRItem[]): void {
-  const now = Date.now();
+export function persistPRs(db: Database, items: PRItem[], runTs?: number): void {
+  const now = runTs ?? Date.now();
   const stmt = db.prepare(
     `INSERT INTO prs (repo, number, title, url, author, bucket, is_draft, review_decision, checks, updated_at, fetched_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -257,8 +267,11 @@ export async function runPRFetch(db: Database, ghRunner: GhRunner = defaultGhRun
   // Resolve login — if gh is not auth'd this will throw and we'll skip
   const loginRaw = await ghRunner(["gh", "api", "user", "--jq", ".login"]);
   const login = loginRaw.trim().replace(/^"|"$/g, "");
-  if (!login) return;
+  if (!login) return; // empty login — preserve existing rows, do not prune
 
+  const runTs = Date.now();
   const items = await fetchAndClassifyPRs(login, ghRunner);
-  persistPRs(db, items);
+  // fetchAndClassifyPRs succeeded — persist and prune rows not seen in this run
+  persistPRs(db, items, runTs);
+  db.run("DELETE FROM prs WHERE fetched_at < ? OR fetched_at IS NULL", [runTs]);
 }

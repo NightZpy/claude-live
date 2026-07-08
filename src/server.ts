@@ -323,9 +323,9 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
              CASE bucket
                WHEN 'needs_my_review'      THEN 0
                WHEN 'changes_requested'    THEN 1
-               WHEN 'commented_unanswered' THEN 2
-               WHEN 'mine_mergeable'       THEN 3
-               WHEN 'mine_blocked'         THEN 4
+               WHEN 'mine_mergeable'       THEN 2
+               WHEN 'mine_blocked'         THEN 3
+               WHEN 'commented_unanswered' THEN 4
                WHEN 'reviewed_by_me'       THEN 5
                ELSE 6
              END, updated_at DESC`
@@ -552,6 +552,16 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         const now = Date.now();
         const runner = opts.refreshRunner ?? defaultRunner;
 
+        // 1. PRs — deterministic, zero-LLM; runs on every refresh regardless of LLM state
+        if (freshCfg.prsEnabled !== false) {
+          const ghRunner = opts.prRunner ?? defaultGhRunner;
+          try {
+            await runPRFetch(db, ghRunner);
+          } catch {
+            // best-effort: gh not auth'd or not installed — skip silently
+          }
+        }
+
         const { allowed, reason } = llmAllowed(db, freshCfg, now);
         if (!allowed) {
           return Response.json({
@@ -572,7 +582,7 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         let deadlines_checked = 0;
         let daily = false;
 
-        // 1. Summarizer
+        // 2. Summarizer
         try {
           summaries = await runSummarizer(db, runner, freshCfg.language, freshCfg);
         } catch (err) {
@@ -582,7 +592,7 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           }
         }
 
-        // 2. Slack (only if mentionName configured)
+        // 3. Slack (only if mentionName configured)
         if (freshCfg.mentionName) {
           try {
             await runSlack(db, slackDefaultRunner, runner, freshCfg, now, freshCfg);
@@ -595,7 +605,7 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           }
         }
 
-        // 3. Deadlines
+        // 4. Deadlines
         try {
           await syncDeadlines(db, { llmRunner: runner, linearToken: freshCfg.linearToken, cfg: freshCfg });
           type KindCount = { n: number };
@@ -606,16 +616,6 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
           if (err instanceof Error && err.message.startsWith('LLM_BLOCKED:')) {
             const after = (db.query("SELECT COUNT(*) as n FROM llm_calls").get() as CountRow).n;
             return Response.json({ summaries, slack_ok, deadlines_checked, daily, llm_calls_used: after - before, blocked: err.message.split(':')[1] });
-          }
-        }
-
-        // 4. PRs (if prsEnabled and gh is authenticated)
-        if (freshCfg.prsEnabled !== false) {
-          const ghRunner = opts.prRunner ?? defaultGhRunner;
-          try {
-            await runPRFetch(db, ghRunner);
-          } catch {
-            // best-effort: gh not auth'd or not installed — skip silently
           }
         }
 
