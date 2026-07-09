@@ -296,23 +296,28 @@ try {
     );
   }
 
-  // PRs for assertion (k): one per bucket
-  const prBuckets: Array<[number, string, string, string]> = [
-    [101, "needs_my_review",      "cdptest-needs-review",   "alice"],
-    [102, "changes_requested",    "cdptest-changes-req",    "octocat"],
-    [103, "commented_unanswered", "cdptest-unanswered",     "bob"],
-    [104, "mine_mergeable",       "cdptest-mergeable",      "octocat"],
-    [105, "mine_blocked",         "cdptest-blocked",        "octocat"],
-    [106, "reviewed_by_me",       "cdptest-reviewed",       "carol"],
+  // PRs for assertion (k): one per bucket across two orgs
+  // Org "octocat" (octocat/hello-world): non-actionable buckets
+  const prBuckets: Array<[number, string, string, string, string]> = [
+    [101, "needs_my_review",       "cdptest-needs-review",   "alice",   "octocat/hello-world"],
+    [102, "changes_requested",     "cdptest-changes-req",    "octocat", "octocat/hello-world"],
+    [103, "commented_unanswered",  "cdptest-unanswered",     "bob",     "octocat/hello-world"],
+    [104, "mine_mergeable",        "cdptest-mergeable",      "octocat", "octocat/hello-world"],
+    [105, "mine_blocked",          "cdptest-blocked",        "octocat", "octocat/hello-world"],
+    [106, "reviewed_by_me",        "cdptest-reviewed",       "carol",   "octocat/hello-world"],
+    // Direct-review PR in org "acme" — actionable, should be counted in hero
+    [201, "needs_my_review",       "acme-direct-review",     "alice",   "acme/myrepo"],
+    // Team-only review PR in org "acme" — NOT actionable, must NOT inflate hero
+    [202, "review_requested_team", "acme-team-review",       "alice",   "acme/myrepo"],
   ];
-  for (const [num, bucket, title, author] of prBuckets) {
+  for (const [num, bucket, title, author, repo] of prBuckets) {
     seedDb.run(
       `INSERT OR IGNORE INTO prs
          (repo, number, title, url, author, bucket, is_draft, review_decision, checks, updated_at, fetched_at)
        VALUES (?,?,?,?,?,?,0,NULL,NULL,?,?)`,
       [
-        "octocat/hello-world", num, title,
-        `https://github.com/octocat/hello-world/pull/${num}`,
+        repo, num, title,
+        `https://github.com/${repo}/pull/${num}`,
         author, bucket, new Date().toISOString(), nowMs,
       ],
     );
@@ -608,6 +613,9 @@ try {
   console.log("✓ (j): conversations chip → view with seeded unlinked mention, hero includes unlinked count, filter works");
 
   // (k) PRs chip → prs-view visible, actionable by default, hero includes actionable PRs
+  //     + direct-vs-team review: team PR NOT counted as actionable
+  //     + collapsed hero dropdown: summary items not per-PR rows, no "sin proyecto"
+  //     + org filter: two orgs visible, filtering works
   const kChipExists = await evaluate(cdp, "!!document.getElementById('prs-chip')");
   if (!kChipExists) fail("(k): #prs-chip not found");
   // Navigate back to projects view first to reset state
@@ -616,17 +624,40 @@ try {
   await evaluate(cdp, "document.getElementById('sessions-chip').click()"); // toggle off
   await sleep(300);
 
-  // Hero should include 3 actionable PRs (needs_my_review, changes_requested, commented_unanswered)
+  // Hero should include actionable PRs: 3 (needs_my_review×2, changes_requested, commented_unanswered)
+  // acme-team-review (review_requested_team) must NOT be counted → hero must not inflate by it
   const kHeroText = await evaluate(cdp, "(document.getElementById('hero')?.textContent || '').trim()");
   const kHeroN = parseInt(kHeroText.replace(/[^0-9]/g, ""), 10);
-  // We seeded 3 actionable PRs; hero must be ≥ 3
+  // We seeded 3+1 actionable (needs×2, changes×1, unanswered×1) but team PR is excluded
   if (isNaN(kHeroN) || kHeroN < 3) {
-    // tolerate "al día" only if it somehow read 0 PRs (shouldn't happen with seeded data)
     if (!kHeroText.includes("al día") && !kHeroText.toLowerCase().includes("up to date")) {
-      fail(`(k): hero="${kHeroText}", expected ≥3 (3 actionable PRs seeded)`);
+      fail(`(k): hero="${kHeroText}", expected ≥3 (actionable PRs seeded, team-review excluded)`);
     }
   }
-  console.log(`✓ (k): hero includes PR count: "${kHeroText}"`);
+  console.log(`✓ (k): hero includes PR count: "${kHeroText}" (team-review not inflating)`);
+
+  // (k.1) Hero dropdown: collapsed PR summary, no "sin proyecto" label for PR items
+  if (kHeroN >= 1) {
+    await evaluate(cdp, "document.getElementById('hero').click()");
+    await sleep(300);
+    const kDdHidden = await evaluate(cdp, "document.getElementById('hero-dropdown').hidden");
+    if (kDdHidden) fail("(k.1): hero-dropdown still hidden after click");
+    const kDdItems = await evaluate(cdp, "document.querySelectorAll('#hero-dropdown .hero-item').length");
+    if (kDdItems < 1) fail(`(k.1): hero-dropdown has ${kDdItems} items, expected ≥1`);
+    // PR items (kind="pr") must NOT show "sin proyecto" — they should show "PRs"
+    const kPrItemsHaveSinProyecto = await evaluate(cdp, `Array.from(document.querySelectorAll('#hero-dropdown .hero-item[data-kind="pr"]')).some(function(el){ return (el.querySelector('.hi-proj')?.textContent || '').toLowerCase().includes('sin proyecto'); })`);
+    if (kPrItemsHaveSinProyecto) fail(`(k.1): PR hero-item shows "sin proyecto" — must show "PRs" label instead`);
+    // No per-PR title rows — instead collapsed summaries with count
+    // Check that there's NO individual PR title like "cdptest-needs-review" in the dropdown
+    const kDdText = await evaluate(cdp, "(document.getElementById('hero-dropdown')?.textContent || '').toLowerCase()");
+    if (kDdText.includes("cdptest-")) fail(`(k.1): hero-dropdown shows individual PR titles — should be collapsed summary, not per-PR rows. Got: "${kDdText.slice(0, 200)}"`);
+    // Collapsed summary must have a PR summary item (with "prs" label and a count phrase)
+    const kDdHasPrSummary = await evaluate(cdp, `Array.from(document.querySelectorAll('#hero-dropdown .hero-item')).some(function(el){ return el.querySelector('.hi-proj')?.textContent?.toLowerCase().includes('pr'); })`);
+    if (!kDdHasPrSummary) fail("(k.1): hero-dropdown has no PR summary item (expected collapsed ⑃ N PRs... entry with PRs label)");
+    console.log(`✓ (k.1): hero dropdown has ${kDdItems} items, collapsed PR summary (no per-PR rows, no "sin proyecto")`);
+    // Close dropdown
+    await evaluate(cdp, "document.getElementById('hero-dropdown').hidden = true");
+  }
 
   // Click prs-chip → prs-view becomes visible
   await evaluate(cdp, "document.getElementById('prs-chip').click()");
@@ -639,11 +670,35 @@ try {
   if (!kPrsText.includes("cdptest-needs-review")) fail(`(k): 'cdptest-needs-review' (needs_my_review) not found in prs-view. Got: "${kPrsText.slice(0, 300)}"`);
   if (!kPrsText.includes("cdptest-changes-req")) fail(`(k): 'cdptest-changes-req' (changes_requested) not found in prs-view. Got: "${kPrsText.slice(0, 300)}"`);
   if (!kPrsText.includes("cdptest-unanswered")) fail(`(k): 'cdptest-unanswered' (commented_unanswered) not found in prs-view. Got: "${kPrsText.slice(0, 300)}"`);
+  // acme-direct-review is needs_my_review, so it SHOULD appear in actionable filter
+  if (!kPrsText.includes("acme-direct-review")) fail(`(k): 'acme-direct-review' (direct needs_my_review) not found in prs-view actionable filter`);
   // Non-actionable PRs should NOT be visible with default (actionable) filter
   if (kPrsText.includes("cdptest-mergeable")) fail(`(k): 'cdptest-mergeable' (non-actionable) appeared in default actionable filter view`);
   if (kPrsText.includes("cdptest-blocked")) fail(`(k): 'cdptest-blocked' (non-actionable) appeared in default actionable filter view`);
   if (kPrsText.includes("cdptest-reviewed")) fail(`(k): 'cdptest-reviewed' (non-actionable) appeared in default actionable filter view`);
-  console.log("✓ (k): PRs chip → view shows actionable buckets by default, hero includes actionable PR count");
+  // Team-review PR must NOT appear in actionable filter
+  if (kPrsText.includes("acme-team-review")) fail(`(k): 'acme-team-review' (team-only, non-actionable) appeared in default actionable filter view — team PRs must be excluded from hero`);
+  console.log("✓ (k): PRs chip → actionable by default (team-review excluded), hero includes direct actionable PRs");
+
+  // (k.2) Org filter: both orgs (acme, octocat) should appear in filter row; switching works
+  // Switch to "All" filter to see PRs from both orgs
+  await evaluate(cdp, "(() => { var chips = document.querySelectorAll('#prs-view [data-pr-filter]'); chips.forEach(function(c){ if(c.dataset.prFilter==='all') c.click(); }); })()");
+  await sleep(400);
+  const kAllPrsText = await evaluate(cdp, "(document.getElementById('prs-view')?.textContent || '').toLowerCase()");
+  // Both orgs should appear in the filter row
+  const kHasOctocat = kAllPrsText.includes("octocat");
+  const kHasAcme = kAllPrsText.includes("acme");
+  if (!kHasOctocat) fail(`(k.2): org 'octocat' not found in prs-view after switching to All filter. Got: "${kAllPrsText.slice(0, 400)}"`);
+  if (!kHasAcme) fail(`(k.2): org 'acme' not found in prs-view after switching to All filter. Got: "${kAllPrsText.slice(0, 400)}"`);
+  console.log("✓ (k.2): org filter shows both orgs (octocat, acme) in prs-view");
+  // Click acme org filter → only acme PRs visible
+  await evaluate(cdp, "(() => { var chips = document.querySelectorAll('#prs-view [data-pr-org]'); chips.forEach(function(c){ if(c.dataset.prOrg==='acme') c.click(); }); })()");
+  await sleep(400);
+  const kAcmePrsText = await evaluate(cdp, "(document.getElementById('prs-view')?.textContent || '').toLowerCase()");
+  if (!kAcmePrsText.includes("acme")) fail(`(k.2): after selecting acme org filter, no acme content found. Got: "${kAcmePrsText.slice(0, 300)}"`);
+  // octocat PRs titles should not appear when filtered to acme
+  if (kAcmePrsText.includes("cdptest-needs-review")) fail(`(k.2): 'cdptest-needs-review' (octocat org) visible after filtering to acme`);
+  console.log("✓ (k.2): acme org filter shows only acme PRs, octocat PRs hidden");
 
   // (l) Linear chip → #linear-view visible; seeded issues render sorted by priority; hero includes count
   const lChipExists = await evaluate(cdp, "!!document.getElementById('linear-chip')");

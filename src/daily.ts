@@ -240,7 +240,7 @@ export function buildDailyDigest(db: Database, now: number, instanceDirs: string
   return trimmed.join("\n\n").slice(0, DIGEST_CAP);
 }
 
-function buildDailyPrompt(digest: string, nonce: string): string {
+export function buildDailyPrompt(digest: string, nonce: string): string {
   return `You are a daily standup generator. Respond with STRICT JSON only — no markdown, no explanation, no preamble. Output a single JSON object and nothing else.
 
 Required shape:
@@ -255,7 +255,7 @@ BULLET REQUIREMENTS (STRICT):
 4. OMIT sessions or items with no meaningful work. A session that was waiting for input with no task completed produces NOTHING — no filler lines like "session initiated", "awaiting user direction", or "no task defined". If an entire category has no meaningful items, output "" for that field.
 5. Order bullets by significance — most important work first.
 6. When the digest includes PR numbers, issue refs (e.g. AG-123), include them as supporting detail in the bullet.
-7. FORBIDDEN: bare counts ("30 modifications", "3 sessions"), context-free nouns ("Artifact published", "Analysis done"), folder names as subjects ("acme:", "backend-svc:"), or filler phrases ("awaiting user direction", "session initiated without defined task").
+7. FORBIDDEN: bare counts ("30 modifications", "3 sessions"), context-free nouns ("Artifact published", "Analysis done"), folder names as subjects ("acme-web:", "backend-svc:"), or filler phrases ("awaiting user direction", "session initiated without defined task").
 8. OUTCOME OVER MECHANISM: Describe the DOMAIN OUTCOME — what was created, changed, or verified in product/business terms. NEVER describe the internal tooling, scripts, or model names used to produce it. Internal tool names (watchdog, dispatcher, runner) may only appear when the deliverable itself IS that tool.
    BAD: "deployed watchdog with Sonnet dispatch for hourly monitoring" — describes internal mechanism, not domain outcome.
    GOOD: "eval alerts were created in Grafana and monitored through the day to confirm they fire correctly" — describes what was verified in the product.
@@ -264,7 +264,7 @@ BULLET REQUIREMENTS (STRICT):
 
 BAD examples (DO NOT produce these):
 - "backend-svc: session initiated without defined task, awaiting user direction" (filler + folder-as-subject)
-- "acme: 30 modifications after parallel analysis" (folder-as-subject + context-free count)
+- "acme-web: 30 modifications after parallel analysis" (folder-as-subject + context-free count)
 - "Artifact published"
 - "Continued work on the system"
 - "deployed watchdog with Sonnet dispatch for hourly monitoring" (mechanism, not outcome)

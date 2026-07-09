@@ -85,6 +85,11 @@ const I18N = {
     linear_connected: "Conectado",
     linear_disconnect: "Desconectar",
     linear_settings_section: "Linear (OAuth MCP)",
+    pr_review_team: "Review de equipo",
+    pr_org_all: "Todas",
+    pr_hero_to_review: "%n% PRs por revisar",
+    pr_hero_changes: "%n% con cambios pedidos",
+    pr_hero_unanswered: "%n% sin responder",
   },
   en: {
     sessions: "Sessions", active: "active", archived: "Archived",
@@ -168,6 +173,11 @@ const I18N = {
     linear_connected: "Connected",
     linear_disconnect: "Disconnect",
     linear_settings_section: "Linear (OAuth MCP)",
+    pr_review_team: "Team review",
+    pr_org_all: "All",
+    pr_hero_to_review: "%n% PRs to review",
+    pr_hero_changes: "%n% with changes requested",
+    pr_hero_unanswered: "%n% unanswered",
   },
   pt: {
     sessions: "Sessões", active: "ativas", archived: "Arquivadas",
@@ -251,6 +261,11 @@ const I18N = {
     linear_connected: "Conectado",
     linear_disconnect: "Desconectar",
     linear_settings_section: "Linear (OAuth MCP)",
+    pr_review_team: "Review de equipe",
+    pr_org_all: "Todas",
+    pr_hero_to_review: "%n% PRs para revisar",
+    pr_hero_changes: "%n% com mudanças pedidas",
+    pr_hero_unanswered: "%n% sem resposta",
   },
 };
 
@@ -275,6 +290,7 @@ let _lastConversations = null;  // null = not yet fetched
 let _convFilter = 'open';       // 'open' | 'resolved' | 'all'
 let _lastPRs = null;            // null = not yet fetched; { prs: [], counts: {} }
 let _prFilter = 'actionable';   // 'actionable' | 'all' | bucket name
+let _prOrgFilter = 'all';       // 'all' | specific org string
 let _lastLinearIssues = null;   // null = not yet fetched; { issues: [], count: 0 }
 let _sessHideArchived = true;   // default: hide archived sessions
 let _sessShowEmpty = false;     // default: hide filler/empty sessions
@@ -549,14 +565,23 @@ function buildHeroDropdownItems(projects) {
     var excerpt = (m.text || "").slice(0, 40);
     items.push({ proj: null, what: "@ " + (m.author || "") + ": " + excerpt, id: null, kind: "mention" });
   });
-  // Actionable PRs
-  var actionableBuckets = new Set(["needs_my_review", "changes_requested", "commented_unanswered"]);
-  if (_lastPRs && _lastPRs.prs) {
-    _lastPRs.prs.filter(function(pr) { return actionableBuckets.has(pr.bucket); }).slice(0, 10).forEach(function(pr) {
-      var repoNum = (pr.repo || "").split("/").pop() + "#" + pr.number;
-      var title = (pr.title || "").slice(0, 50);
-      items.push({ proj: null, what: "⑃ " + repoNum + ": " + title, id: pr.id, kind: "pr", prBucket: pr.bucket });
-    });
+  // Actionable PRs — collapsed summary: one item per actionable bucket with count>0
+  if (_lastPRs && _lastPRs.counts) {
+    var toReview = _lastPRs.counts.needs_my_review || 0;
+    var changes = _lastPRs.counts.changes_requested || 0;
+    var unanswered = _lastPRs.counts.commented_unanswered || 0;
+    if (toReview > 0) {
+      var label = (t.pr_hero_to_review || "%n% PRs por revisar").replace("%n%", toReview);
+      items.push({ proj: null, what: "⑃ " + label, id: null, kind: "pr" });
+    }
+    if (changes > 0) {
+      var label = (t.pr_hero_changes || "%n% con cambios pedidos").replace("%n%", changes);
+      items.push({ proj: null, what: "⑃ " + label, id: null, kind: "pr" });
+    }
+    if (unanswered > 0) {
+      var label = (t.pr_hero_unanswered || "%n% sin responder").replace("%n%", unanswered);
+      items.push({ proj: null, what: "⑃ " + label, id: null, kind: "pr" });
+    }
   }
   // Assigned Linear issues
   if (_lastLinearIssues && _lastLinearIssues.issues) {
@@ -575,7 +600,9 @@ function toggleHeroDropdown(projects) {
   const items = buildHeroDropdownItems(projects);
   if (!items.length) return;
   dd.innerHTML = items.map(function(item) {
-    var projLabel = item.proj != null ? item.proj : (t.conv_no_project || "sin proyecto");
+    var projLabel = item.proj != null
+      ? item.proj
+      : (item.kind === "pr" ? (t.strip_prs || "PRs") : (t.conv_no_project || "sin proyecto"));
     return '<div class="hero-item" data-key="' + (item.proj != null ? esc(item.proj) : "") +
       '" data-unlinked="' + (item.proj == null ? "1" : "0") +
       '" data-kind="' + esc(item.kind || "proj") + '">' +
@@ -1391,23 +1418,25 @@ function openConversationsView() {
 
 // ── PRs strip ─────────────────────────────────────────────────────────────
 var PR_BUCKET_LABELS = {
-  needs_my_review:      function() { return t.pr_needs_my_review      || "To review"; },
-  changes_requested:    function() { return t.pr_changes_requested    || "Changes requested"; },
-  commented_unanswered: function() { return t.pr_commented_unanswered || "Commented, unanswered"; },
-  mine_mergeable:       function() { return t.pr_mine_mergeable       || "Mine, mergeable"; },
-  mine_blocked:         function() { return t.pr_mine_blocked         || "Mine, not mergeable"; },
-  reviewed_by_me:       function() { return t.pr_reviewed_by_me       || "Reviewed"; },
+  needs_my_review:       function() { return t.pr_needs_my_review      || "To review"; },
+  changes_requested:     function() { return t.pr_changes_requested    || "Changes requested"; },
+  commented_unanswered:  function() { return t.pr_commented_unanswered || "Commented, unanswered"; },
+  mine_mergeable:        function() { return t.pr_mine_mergeable       || "Mine, mergeable"; },
+  mine_blocked:          function() { return t.pr_mine_blocked         || "Mine, not mergeable"; },
+  reviewed_by_me:        function() { return t.pr_reviewed_by_me       || "Reviewed"; },
+  review_requested_team: function() { return t.pr_review_team          || "Team review"; },
 };
-var PR_BUCKET_ORDER = ["needs_my_review","changes_requested","mine_mergeable","mine_blocked","commented_unanswered","reviewed_by_me"];
+var PR_BUCKET_ORDER = ["needs_my_review","changes_requested","mine_mergeable","mine_blocked","commented_unanswered","reviewed_by_me","review_requested_team"];
 var PR_ACTIONABLE = new Set(["needs_my_review","changes_requested","commented_unanswered"]);
 
 var PR_BUCKET_COLORS = {
-  needs_my_review:      "amber",
-  changes_requested:    "red",
-  commented_unanswered: "amber",
-  mine_mergeable:       "green",
-  mine_blocked:         "dim",
-  reviewed_by_me:       "dim",
+  needs_my_review:       "amber",
+  changes_requested:     "red",
+  commented_unanswered:  "amber",
+  mine_mergeable:        "green",
+  mine_blocked:          "dim",
+  reviewed_by_me:        "dim",
+  review_requested_team: "dim",
 };
 
 function updatePRsChip(prsData) {
@@ -1433,21 +1462,46 @@ function buildPRsFilterRow(activeFilter) {
   return '<div class="ev-filter-row" style="flex-wrap:wrap">' + chips + "</div>";
 }
 
+function buildOrgFilterRow(all, activeOrg) {
+  // Derive distinct orgs from all PR rows (owner = repo.split('/')[0])
+  var orgs = [];
+  var seen = {};
+  (all || []).forEach(function(p) {
+    var org = (p.repo || "").split("/")[0];
+    if (org && !seen[org]) { seen[org] = true; orgs.push(org); }
+  });
+  if (orgs.length <= 1) return ""; // no filter needed when 0 or 1 org
+  var chips = [{ key: "all", label: t.pr_org_all || "All" }].concat(
+    orgs.map(function(o) { return { key: o, label: o }; })
+  ).map(function(seg) {
+    return '<span class="ev-chip' + (activeOrg === seg.key ? " active" : "") +
+      '" data-pr-org="' + esc(seg.key) + '">' + esc(seg.label) + "</span>";
+  }).join("");
+  return '<div class="ev-filter-row" style="flex-wrap:wrap;border-top:1px solid var(--border,#21262d)">' + chips + "</div>";
+}
+
 function renderPRsList(container, prsData, filter) {
   var all = (prsData && prsData.prs) ? prsData.prs : [];
   var filterRow = buildPRsFilterRow(filter);
+  var orgFilterRow = buildOrgFilterRow(all, _prOrgFilter);
 
-  var filtered;
+  // Apply bucket filter
+  var bucketFiltered;
   if (filter === "actionable") {
-    filtered = all.filter(function(p) { return PR_ACTIONABLE.has(p.bucket); });
+    bucketFiltered = all.filter(function(p) { return PR_ACTIONABLE.has(p.bucket); });
   } else if (filter === "all") {
-    filtered = all;
+    bucketFiltered = all;
   } else {
-    filtered = all.filter(function(p) { return p.bucket === filter; });
+    bucketFiltered = all.filter(function(p) { return p.bucket === filter; });
   }
 
+  // Apply org filter on top
+  var filtered = _prOrgFilter === "all"
+    ? bucketFiltered
+    : bucketFiltered.filter(function(p) { return (p.repo || "").split("/")[0] === _prOrgFilter; });
+
   if (filtered.length === 0) {
-    container.innerHTML = filterRow + '<div class="dim" style="padding:8px 14px;font-size:12px">—</div>';
+    container.innerHTML = filterRow + orgFilterRow + '<div class="dim" style="padding:8px 14px;font-size:12px">—</div>';
     wirePRsFilter(container, prsData);
     return;
   }
@@ -1464,7 +1518,10 @@ function renderPRsList(container, prsData, filter) {
     var color = PR_BUCKET_COLORS[b] || "dim";
     rows += '<div style="padding:4px 14px 2px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em" class="' + esc(color) + '">' + esc(PR_BUCKET_LABELS[b]()) + '</div>';
     grp.forEach(function(pr) {
-      var repoNum = '<span style="font-family:monospace;font-size:11px">' + esc((pr.repo || "").split("/").pop() + "#" + pr.number) + "</span>";
+      var org = (pr.repo || "").split("/")[0];
+      var repoName = (pr.repo || "").split("/").pop();
+      var repoNum = '<span style="font-family:monospace;font-size:11px">' + esc(repoName + "#" + pr.number) + "</span>";
+      var orgChip = org ? '<span style="font-size:9px;padding:1px 4px;border:1px solid var(--border,#21262d);border-radius:3px;font-family:monospace">' + esc(org) + "</span>" : "";
       var title = esc((pr.title || "").slice(0, 90));
       var author = pr.author ? '<span class="dim" style="font-size:10px">' + esc(pr.author) + "</span>" : "";
       var checksBadge = pr.checks === "success" ? '<span class="green" style="font-size:9px">✓ CI</span>'
@@ -1476,7 +1533,7 @@ function renderPRsList(container, prsData, filter) {
       rows += '<div class="frow" style="align-items:flex-start;padding:5px 14px;gap:6px;border-bottom:1px solid var(--border,#21262d);cursor:pointer" data-url="' + esc(pr.url || "") + '">' +
         '<div style="flex:1;min-width:0">' +
           '<div style="display:flex;align-items:center;gap:5px;margin-bottom:2px;flex-wrap:wrap">' +
-            repoNum + ' <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + title + "</span>" +
+            orgChip + repoNum + ' <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + title + "</span>" +
           "</div>" +
           '<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">' +
             author + bucketChip + draftBadge + checksBadge + age +
@@ -1486,8 +1543,16 @@ function renderPRsList(container, prsData, filter) {
     });
   });
 
-  container.innerHTML = filterRow + rows;
+  container.innerHTML = filterRow + orgFilterRow + rows;
   wirePRsFilter(container, prsData);
+
+  // Wire org filter chips
+  container.querySelectorAll("[data-pr-org]").forEach(function(chip) {
+    chip.addEventListener("click", function() {
+      _prOrgFilter = chip.dataset.prOrg;
+      renderPRsList(container, prsData || _lastPRs, _prFilter);
+    });
+  });
 
   // Wire click-through for PR rows
   container.querySelectorAll("[data-url]").forEach(function(el) {
