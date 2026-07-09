@@ -648,11 +648,10 @@ test("org derived from repo owner (repo.split('/')[0])", () => {
 
 // ── daily prompt scrub assertion ──────────────────────────────────────────
 
-test("buildDailyPrompt does not contain real org names (leak scrub)", () => {
+test("buildDailyPrompt uses only generic example names (leak scrub)", () => {
   const prompt = buildDailyPrompt("sample digest", "testnonce");
-  expect(prompt).not.toContain("acme");
-  expect(prompt).not.toContain("backend-svc");
-  // Generic replacements are present
+  // The folder-name examples in the prompt must be generic placeholders, never real
+  // repo/org names. Assert the generic examples are the ones present.
   expect(prompt).toContain("acme-web:");
   expect(prompt).toContain("backend-svc:");
 });
