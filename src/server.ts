@@ -349,13 +349,14 @@ export function createServer(db: Database, opts: { port?: number; dailyRunner?: 
         const rows = db.query(
           `SELECT * FROM prs ORDER BY
              CASE bucket
-               WHEN 'needs_my_review'      THEN 0
-               WHEN 'changes_requested'    THEN 1
-               WHEN 'mine_mergeable'       THEN 2
-               WHEN 'mine_blocked'         THEN 3
-               WHEN 'commented_unanswered' THEN 4
-               WHEN 'reviewed_by_me'       THEN 5
-               ELSE 6
+               WHEN 'needs_my_review'       THEN 0
+               WHEN 'changes_requested'     THEN 1
+               WHEN 'mine_mergeable'        THEN 2
+               WHEN 'mine_blocked'          THEN 3
+               WHEN 'commented_unanswered'  THEN 4
+               WHEN 'reviewed_by_me'        THEN 5
+               WHEN 'review_requested_team' THEN 6
+               ELSE 7
              END, updated_at DESC`
         ).all() as PRRow[];
         const counts: Record<string, number> = {};

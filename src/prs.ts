@@ -8,7 +8,8 @@ export type PRBucket =
   | "commented_unanswered"
   | "mine_mergeable"
   | "mine_blocked"
-  | "reviewed_by_me";
+  | "reviewed_by_me"
+  | "review_requested_team";
 
 export const BUCKET_ORDER: PRBucket[] = [
   "needs_my_review",
@@ -17,6 +18,7 @@ export const BUCKET_ORDER: PRBucket[] = [
   "mine_blocked",
   "commented_unanswered",
   "reviewed_by_me",
+  "review_requested_team",
 ];
 
 export type PRItem = {
@@ -53,6 +55,13 @@ type CommentEntry = {
   createdAt?: string;
 };
 
+// A review request entry: user-type has a login; team-type has slug/name but no login.
+type ReviewRequestEntry = {
+  login?: string;   // present for user-type reviewer
+  slug?: string;    // present for team-type reviewer
+  name?: string;    // present for team-type reviewer
+};
+
 type DetailPR = {
   author: { login: string };
   reviewDecision: string | null;
@@ -62,10 +71,11 @@ type DetailPR = {
   reviews: ReviewEntry[];
   latestReviews: ReviewEntry[];
   comments: CommentEntry[];
+  reviewRequests: ReviewRequestEntry[];
 };
 
 const SEARCH_JSON = "number,title,repository,url,author,isDraft,createdAt,updatedAt";
-const DETAIL_JSON = "reviewDecision,mergeable,isDraft,statusCheckRollup,reviews,latestReviews,comments,author";
+const DETAIL_JSON = "reviewDecision,mergeable,isDraft,statusCheckRollup,reviews,latestReviews,comments,author,reviewRequests";
 
 function checksFromRollup(
   rollup: Array<{ conclusion: string | null; status?: string }> | null
@@ -102,15 +112,18 @@ function classify(
   pr: SearchPR,
   detail: DetailPR,
   login: string,
-  isReviewRequested: boolean
+  isReviewRequested: boolean,
+  isDirectReview: boolean
 ): PRBucket | null {
   const me = login.toLowerCase();
   const authorLogin = (detail.author?.login || pr.author?.login || "").toLowerCase();
   const isMine = authorLogin === me;
 
-  // 1. needs_my_review: review explicitly requested from me (regardless of prior reviews —
-  //    GitHub only keeps this flag set while my review is actually pending)
-  if (isReviewRequested) return "needs_my_review";
+  // 1. needs_my_review: review explicitly requested from me directly (user-type, not team-only)
+  if (isReviewRequested && isDirectReview) return "needs_my_review";
+
+  // 1b. review_requested_team: review requested only via a team (not directly actionable)
+  if (isReviewRequested && !isDirectReview) return "review_requested_team";
 
   // 2. changes_requested: mine AND CHANGES_REQUESTED
   if (isMine && detail.reviewDecision === "CHANGES_REQUESTED") return "changes_requested";
@@ -208,7 +221,10 @@ export async function fetchAndClassifyPRs(
         "--json", DETAIL_JSON,
       ]);
       const detail: DetailPR = JSON.parse(raw);
-      const bucket = classify(pr, detail, login, isReviewRequested);
+      // Determine if I'm a direct (user-type) reviewer — user entries have .login, team entries don't.
+      const reviewRequests: ReviewRequestEntry[] = Array.isArray(detail.reviewRequests) ? detail.reviewRequests : [];
+      const isDirectReview = reviewRequests.some(r => typeof r.login === "string" && r.login.toLowerCase() === login.toLowerCase());
+      const bucket = classify(pr, detail, login, isReviewRequested, isDirectReview);
       if (!bucket) continue;
       results.push({
         number: pr.number,

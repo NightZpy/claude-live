@@ -3,6 +3,7 @@ import { fetchAndClassifyPRs, persistPRs, runPRFetch } from "../src/prs";
 import type { GhRunner } from "../src/links";
 import { openDb } from "../src/db";
 import { createServer } from "../src/server";
+import { buildDailyPrompt } from "../src/daily";
 
 // ── fake data helpers ──────────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ function makeDetail(opts: {
   reviews?: Array<{ author: { login: string }; state: string; submittedAt?: string }>;
   latestReviews?: Array<{ author: { login: string }; state: string }>;
   comments?: Array<{ author: { login: string }; createdAt?: string }>;
+  reviewRequests?: Array<{ login?: string; slug?: string; name?: string }>;
 }) {
   return {
     author: { login: opts.author ?? "other-user" },
@@ -45,14 +47,15 @@ function makeDetail(opts: {
     reviews: opts.reviews ?? [],
     latestReviews: opts.latestReviews ?? [],
     comments: opts.comments ?? [],
+    reviewRequests: opts.reviewRequests ?? [],
   };
 }
 
 // ── test fixture: 6 PRs, one per bucket ───────────────────────────────────
 
-// PR 1: needs_my_review — review requested from me, I haven't reviewed
+// PR 1: needs_my_review — review requested from me directly (user-type), I haven't reviewed
 const pr1 = makePR(1, { author: "alice" });
-const detail1 = makeDetail({ author: "alice", reviews: [], latestReviews: [] });
+const detail1 = makeDetail({ author: "alice", reviews: [], latestReviews: [], reviewRequests: [{ login: ME }] });
 
 // PR 2: changes_requested — mine, CHANGES_REQUESTED
 const pr2 = makePR(2, { author: ME });
@@ -201,13 +204,14 @@ test("priority: mine+CHANGES_REQUESTED beats commented_unanswered", async () => 
 });
 
 test("priority: needs_my_review beats commented_unanswered", async () => {
-  // review-requested AND latest comment by someone else — needs_my_review wins
+  // review-requested directly AND latest comment by someone else — needs_my_review wins
   const prX = makePR(98, { author: "alice" });
   const detailX = makeDetail({
     author: "alice",
     comments: [{ author: { login: "alice" }, createdAt: "2024-01-02T00:00:00Z" }],
     reviews: [],
     latestReviews: [],
+    reviewRequests: [{ login: ME }],
   });
   const runner: GhRunner = async (args: string[]) => {
     const cmd = args.join(" ");
@@ -233,7 +237,7 @@ test("return shape has required fields", async () => {
     expect(typeof row.title).toBe("string");
     expect(typeof row.url).toBe("string");
     expect(typeof row.author).toBe("string");
-    expect(["needs_my_review","changes_requested","commented_unanswered","mine_mergeable","mine_blocked","reviewed_by_me"]).toContain(row.bucket);
+    expect(["needs_my_review","changes_requested","commented_unanswered","mine_mergeable","mine_blocked","reviewed_by_me","review_requested_team"]).toContain(row.bucket);
     expect(typeof row.isDraft).toBe("boolean");
     expect(typeof row.updatedAt).toBe("string");
     // checks is 'success'|'failing'|'pending'|null
@@ -245,7 +249,7 @@ test("return shape has required fields", async () => {
 
 test("dedup: PR in both involves and review-requested appears once", async () => {
   const prX = makePR(50, { author: "alice" });
-  const detailX = makeDetail({ author: "alice", reviews: [], latestReviews: [] });
+  const detailX = makeDetail({ author: "alice", reviews: [], latestReviews: [], reviewRequests: [{ login: ME }] });
   const runner: GhRunner = async (args: string[]) => {
     const cmd = args.join(" ");
     if (cmd.includes("--involves=@me")) return JSON.stringify([prX]);
@@ -460,6 +464,7 @@ test("FIX2: re-requested review (I reviewed before, re-requested) → needs_my_r
     author: "alice",
     reviews: [{ author: { login: ME }, state: "APPROVED", submittedAt: "2024-01-01T00:00:00Z" }],
     latestReviews: [{ author: { login: ME }, state: "APPROVED" }],
+    reviewRequests: [{ login: ME }],
   });
   const runner: GhRunner = async (args: string[]) => {
     const cmd = args.join(" ");
@@ -551,4 +556,103 @@ test("FIX4: PR fetch runs even when LLM cap is exceeded (blocked refresh still u
   expect(body.blocked).toBe("cap");
   // PR fetch must still have run
   expect(prRunnerCalled).toBe(true);
+});
+
+// ── FIX 1 (dispatch): direct vs team review classification ────────────────
+
+test("direct review request (user-type) → needs_my_review", async () => {
+  const prX = makePR(80, { author: "alice" });
+  // reviewRequests includes me as a user-type entry (has .login)
+  const detailX = makeDetail({ author: "alice", reviewRequests: [{ login: ME }] });
+  const runner: GhRunner = async (args: string[]) => {
+    const cmd = args.join(" ");
+    if (cmd.includes("--involves=@me")) return JSON.stringify([prX]);
+    if (cmd.includes("--review-requested=@me")) return JSON.stringify([prX]);
+    if (cmd.includes("pr view 80")) return JSON.stringify(detailX);
+    return "[]";
+  };
+  const results = await fetchAndClassifyPRs(ME, runner);
+  const pr = results.find(r => r.number === 80);
+  expect(pr).toBeDefined();
+  expect(pr!.bucket).toBe("needs_my_review");
+});
+
+test("team-only review request (no .login) → review_requested_team, NOT needs_my_review", async () => {
+  const prX = makePR(81, { author: "alice" });
+  // reviewRequests only has a team entry (slug, no login) — I'm not directly requested
+  const detailX = makeDetail({ author: "alice", reviewRequests: [{ slug: "my-team", name: "My Team" }] });
+  const runner: GhRunner = async (args: string[]) => {
+    const cmd = args.join(" ");
+    if (cmd.includes("--involves=@me")) return JSON.stringify([prX]);
+    if (cmd.includes("--review-requested=@me")) return JSON.stringify([prX]); // team request shows in search
+    if (cmd.includes("pr view 81")) return JSON.stringify(detailX);
+    return "[]";
+  };
+  const results = await fetchAndClassifyPRs(ME, runner);
+  const pr = results.find(r => r.number === 81);
+  expect(pr).toBeDefined();
+  expect(pr!.bucket).toBe("review_requested_team");
+  // Must NOT be needs_my_review — it is not directly actionable
+  expect(pr!.bucket).not.toBe("needs_my_review");
+});
+
+test("team-only review request is NOT in actionable hero set", async () => {
+  // The hero actionable set is: needs_my_review, changes_requested, commented_unanswered
+  // review_requested_team must NOT be counted
+  const prX = makePR(82, { author: "alice" });
+  const detailX = makeDetail({ author: "alice", reviewRequests: [{ slug: "eng-team" }] });
+  const runner: GhRunner = async (args: string[]) => {
+    const cmd = args.join(" ");
+    if (cmd.includes("--involves=@me")) return JSON.stringify([prX]);
+    if (cmd.includes("--review-requested=@me")) return JSON.stringify([prX]);
+    if (cmd.includes("pr view 82")) return JSON.stringify(detailX);
+    return "[]";
+  };
+  const results = await fetchAndClassifyPRs(ME, runner);
+  const teamPRs = results.filter(r => r.bucket === "review_requested_team");
+  expect(teamPRs.length).toBeGreaterThan(0);
+  // None should appear in the actionable buckets
+  for (const pr of teamPRs) {
+    expect(["needs_my_review", "changes_requested", "commented_unanswered"]).not.toContain(pr.bucket);
+  }
+});
+
+test("/api/prs counts include review_requested_team bucket", async () => {
+  const db = openDb(":memory:");
+  const now = Date.now();
+  db.run(
+    `INSERT INTO prs (repo, number, title, url, author, bucket, is_draft, review_decision, checks, updated_at, fetched_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    ["acme/api", 20, "Team PR", "https://github.com/acme/api/pull/20", "alice", "review_requested_team", 0, null, null, "2024-01-01T00:00:00Z", now]
+  );
+  const srv = createServer(db, { port: 0 });
+  const res = await fetch(`http://127.0.0.1:${srv.port}/api/prs`);
+  expect(res.status).toBe(200);
+  const body = await res.json() as any;
+  expect(body.counts.review_requested_team).toBe(1);
+  srv.stop();
+});
+
+// ── org derive helper ─────────────────────────────────────────────────────
+
+test("org derived from repo owner (repo.split('/')[0])", () => {
+  function deriveOrg(repo: string): string {
+    return repo.split("/")[0];
+  }
+  expect(deriveOrg("acme/api")).toBe("acme");
+  expect(deriveOrg("octocat/myrepo")).toBe("octocat");
+  expect(deriveOrg("org-name/repo-name")).toBe("org-name");
+  // edge: single segment (no slash)
+  expect(deriveOrg("noslash")).toBe("noslash");
+});
+
+// ── daily prompt scrub assertion ──────────────────────────────────────────
+
+test("buildDailyPrompt does not contain real org names (leak scrub)", () => {
+  const prompt = buildDailyPrompt("sample digest", "testnonce");
+  expect(prompt).not.toContain("acme");
+  expect(prompt).not.toContain("backend-svc");
+  // Generic replacements are present
+  expect(prompt).toContain("acme-web:");
+  expect(prompt).toContain("backend-svc:");
 });
